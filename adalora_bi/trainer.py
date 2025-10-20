@@ -111,6 +111,8 @@ def fine_tune_lora_dynamic(
                 model, module_names, ranks, alpha=alpha, dropout=dropout
             )
             print(f"Patched {len(patched)} modules with LoRA adapters.")
+            # Ensure LoRA adapters are moved to same device
+            model.to(device)   
 
         # 2️⃣ Enable LoRA params
         enable_lora_params(model)

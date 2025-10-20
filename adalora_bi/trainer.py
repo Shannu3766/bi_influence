@@ -6,6 +6,7 @@ from typing import Optional
 from .importance import compute_bi_importance_from_dataloader
 from .allocation import bi_allocate_ranks
 from .lora_injector import inject_adaptive_lora
+from tqdm import tqdm
 
 
 def freeze_base_model(model: nn.Module):
@@ -122,7 +123,7 @@ def fine_tune_lora_dynamic(
         # 3️⃣ Train one epoch
         model.train()
         running_loss = 0.0
-        for step, batch in enumerate(train_loader):
+        for step, batch in enumerate(tqdm(train_loader, desc=f"Training epoch {epoch+1}")):
             inputs = {k: v.to(device) for k, v in batch.items() if k != "labels"}
             labels = batch["labels"].to(device)
             outputs = model(**inputs)

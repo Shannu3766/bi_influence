@@ -135,10 +135,10 @@ def fine_tune_lora_dynamic(
             optimizer.step()
 
             running_loss += loss.item()
-            if (step + 1) % log_every == 0:
-                avg_loss = running_loss / log_every
-                print(f"Epoch {epoch+1} step {step+1} avg loss {avg_loss:.4f}")
-                running_loss = 0.0
+            # if (step + 1) % log_every == 0:
+        avg_loss = running_loss / log_every
+        print(f"Epoch {epoch+1} step {step+1} avg loss {avg_loss:.4f}")
+        running_loss = 0.0
 
         # 4️⃣ Validation
         stats = evaluate(model, val_loader, device)

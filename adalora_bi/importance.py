@@ -111,7 +111,8 @@ def compute_bi_importance_from_dataloader(
             continue
         per_batch = []
         for j in range(M):
-            a, b = xin[j].numpy().ravel(), xout[j].numpy().ravel()
+            a = xin[j].detach().to(torch.float32).cpu().numpy().ravel()
+            b = xout[j].detach().to(torch.float32).cpu().numpy().ravel()
             n = min(a.size, b.size)
             a, b = a[:n], b[:n]
             rho = float((a * b).sum()) / (

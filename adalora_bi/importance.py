@@ -4,19 +4,39 @@ import numpy as np
 
 def _make_pre_hook(storage, name):
     def pre_hook(module, inputs):
-        x = inputs[0].detach().cpu()
-        vec = x.mean(dim=tuple(range(0, x.ndim - 1))) if x.ndim > 1 else x
-        storage[name]["in"].append(vec.view(-1))
-
+        x = inputs[0]
+        if isinstance(x, torch.Tensor):
+            x = x.detach().to(torch.float32).cpu()
+            vec = x.mean(dim=tuple(range(0, x.ndim - 1))) if x.ndim > 1 else x
+            storage[name]["in"].append(vec.view(-1))
+        elif isinstance(x, (list, tuple)):
+            parts = []
+            for item in x:
+                if isinstance(item, torch.Tensor):
+                    item = item.detach().to(torch.float32).cpu()
+                    vec = item.mean(dim=tuple(range(0, item.ndim - 1))) if item.ndim > 1 else item
+                    parts.append(vec.view(-1))
+            if parts:
+                storage[name]["in"].append(torch.cat(parts))
     return pre_hook
 
 
 def _make_forward_hook(storage, name):
     def forward_hook(module, inputs, output):
-        x = output.detach().cpu()
-        vec = x.mean(dim=tuple(range(0, x.ndim - 1))) if x.ndim > 1 else x
-        storage[name]["out"].append(vec.view(-1))
-
+        x = output
+        if isinstance(x, torch.Tensor):
+            x = x.detach().to(torch.float32).cpu()
+            vec = x.mean(dim=tuple(range(0, x.ndim - 1))) if x.ndim > 1 else x
+            storage[name]["out"].append(vec.view(-1))
+        elif isinstance(x, (list, tuple)):
+            parts = []
+            for item in x:
+                if isinstance(item, torch.Tensor):
+                    item = item.detach().to(torch.float32).cpu()
+                    vec = item.mean(dim=tuple(range(0, item.ndim - 1))) if item.ndim > 1 else item
+                    parts.append(vec.view(-1))
+            if parts:
+                storage[name]["out"].append(torch.cat(parts))
     return forward_hook
 
 
@@ -31,7 +51,7 @@ def compute_bi_importance_from_dataloader(
     """
     Compute BI scores between input and output activations of Linear layers.
 
-    fast_mode=True → only sample key modules (q_proj, v_proj, fc) for speed.
+    Handles bfloat16/float16 activations safely for DeepSeek & GPT models.
     """
     model.to(device)
     model.eval()
@@ -41,7 +61,6 @@ def compute_bi_importance_from_dataloader(
     for name, module in model.named_modules():
         if isinstance(module, torch.nn.Linear):
             if fast_mode:
-                # Only a few key modules
                 if any(sub in name for sub in ["q_proj", "v_proj", "out_proj", "fc"]):
                     modules.append((name, module))
             elif target_module_name_substrings:
@@ -54,20 +73,13 @@ def compute_bi_importance_from_dataloader(
                 ):
                     modules.append((name, module))
 
-    if fast_mode and not modules:
-        # fallback if model uses different naming
-        count = 0
+    # fallback if none matched
+    if not modules:
         for name, module in model.named_modules():
             if isinstance(module, torch.nn.Linear):
                 modules.append((name, module))
-                count += 1
-                if count >= 10:
+                if fast_mode and len(modules) >= 10:
                     break
-    elif not modules:
-        for name, module in model.named_modules():
-            if isinstance(module, torch.nn.Linear):
-                modules.append((name, module))
-        modules = modules[:20]
 
     module_names = [n for n, _ in modules]
     storage = {n: {"in": [], "out": []} for n in module_names}
@@ -78,7 +90,7 @@ def compute_bi_importance_from_dataloader(
         hooks.append(module.register_forward_pre_hook(_make_pre_hook(storage, name)))
         hooks.append(module.register_forward_hook(_make_forward_hook(storage, name)))
 
-    # Run forward passes
+    # Forward pass (collect activations)
     with torch.no_grad():
         for i, batch in enumerate(dataloader):
             if i >= max_batches:
@@ -109,17 +121,19 @@ def compute_bi_importance_from_dataloader(
         if M == 0:
             scores.append(0.0)
             continue
+
         per_batch = []
         for j in range(M):
-            a = xin[j].detach().to(torch.float32).cpu().numpy().ravel()
-            b = xout[j].detach().to(torch.float32).cpu().numpy().ravel()
+            a = xin[j].detach().to(torch.float32).numpy().ravel()
+            b = xout[j].detach().to(torch.float32).numpy().ravel()
             n = min(a.size, b.size)
+            if n == 0:
+                continue
             a, b = a[:n], b[:n]
-            rho = float((a * b).sum()) / (
-                np.linalg.norm(a) * np.linalg.norm(b) + 1e-12
-            )
+            rho = float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-8))
             per_batch.append(1 - rho)
-        scores.append(float(np.mean(per_batch)))
+
+        scores.append(float(np.mean(per_batch)) if per_batch else 0.0)
 
     scores = np.array(scores)
     if scores.max() > scores.min():

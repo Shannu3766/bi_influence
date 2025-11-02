@@ -7,6 +7,7 @@ from .importance import compute_bi_importance_from_dataloader
 from .allocation import bi_allocate_ranks
 from .lora_injector import inject_adaptive_lora
 from tqdm import tqdm
+import torch.nn.functional as F
 
 
 def freeze_base_model(model: nn.Module):
@@ -43,7 +44,17 @@ def evaluate(model: nn.Module, dataloader, device: str):
             labels = batch["labels"].to(device)
             outputs = model(**inputs)
             logits = outputs.logits if hasattr(outputs, "logits") else outputs
-            loss = criterion(logits, labels)
+            # Universal loss handler: works for classification + causal LM
+            if logits.dim() == 3:
+            # e.g. GPT-2, T5, DeepSeek
+                loss = F.cross_entropy(
+                logits.view(-1, logits.size(-1)),
+                labels.view(-1),
+                ignore_index=100
+                )
+            else:
+                # e.g. DistilBERT classification
+                loss = F.cross_entropy(logits, labels)
             preds = logits.argmax(dim=-1)
             total += labels.size(0)
             correct += (preds == labels).sum().item()

@@ -23,7 +23,7 @@ def apply_adaptive_lora(model, rank_allocation, target_modules=None, lora_alpha=
     """
     if target_modules is None:
         # target_modules = ["q_proj", "k_proj", "v_proj", "o_proj", "dense", "ff", "wi", "wo"]
-        target_modules = ["q_proj", "k_proj", "v_proj", "o_proj", "dense"]
+        target_modules = ["q_proj", "k_proj", "v_proj", "o_proj", "dense", "gate_proj", "up_proj", "down_proj"]
 
     # use smallest rank as base (PEFT expects uniform r)
     base_r = max(1, min(rank_allocation.values()))

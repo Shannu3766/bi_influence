@@ -35,7 +35,7 @@ class AdaptiveLoRACallback(TrainerCallback):
         self.compute_once = compute_once
         self._has_computed_once = False
 
-    def on_epoch_end(self, args, state, control, **kwargs):
+    def on_evaluate(self, args, state, control, **kwargs):
         trainer = kwargs.get("trainer", None)
         if trainer is None:
             return control

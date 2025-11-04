@@ -1,17 +1,17 @@
 import torch
-import numpy as np
 from tqdm import tqdm
 
 def _flatten_tensor(t):
     return t.detach().cpu().reshape(t.shape[0], -1)
 
-def compute_bi_scores(model, dataloader=None, device="cuda", total_rank=64, tau=0.5, r_min=1):
+def compute_bi_scores(model, dataloader=None, device='cuda'):
+    """Compute Block Influence scores for attention-like modules (returns dict name->bi)."""
     model.to(device)
     model.eval()
 
     block_names = []
     for name, _ in model.named_modules():
-        if any(x in name.lower() for x in ["self_attn", "attention", "attn"]):
+        if any(x in name.lower() for x in ['self_attn','attention','attn','q_proj','k_proj','v_proj']):
             block_names.append(name)
     block_names = list(dict.fromkeys(block_names))
 
@@ -21,67 +21,58 @@ def compute_bi_scores(model, dataloader=None, device="cuda", total_rank=64, tau=
 
     def hook_fn(name):
         def fn(mod, inp, outp):
-            if inp is None or (isinstance(inp, (tuple, list)) and len(inp) == 0):
-                return
-            if isinstance(inp, (tuple, list)):
-                inp = inp[0]
-            if not torch.is_tensor(inp) or not torch.is_tensor(outp):
-                return
             try:
+                if isinstance(inp, (tuple,list)) and len(inp)>0:
+                    inp = inp[0]
+                if not torch.is_tensor(inp) or not torch.is_tensor(outp):
+                    return
                 activations_in[name].append(_flatten_tensor(inp))
                 activations_out[name].append(_flatten_tensor(outp))
             except Exception:
-                pass
+                return
         return fn
 
     for n in block_names:
         mod = dict(model.named_modules()).get(n, None)
         if mod is not None:
-            hooks.append(mod.register_forward_hook(hook_fn(n)))
+            try:
+                hooks.append(mod.register_forward_hook(hook_fn(n)))
+            except Exception:
+                pass
 
     with torch.no_grad():
-        for batch in tqdm(dataloader, desc="[Adaptive LoRA] Computing BI scores"):
-            batch = {k: v.to(device) if hasattr(v, "to") else v for k, v in batch.items()}
-            _ = model(**batch)
+        for batch in tqdm(dataloader, desc='[Adaptive LoRA] Computing BI scores'):
+            batch = {k: v.to(device) if hasattr(v,'to') else v for k,v in batch.items()}
+            try:
+                _ = model(**batch)
+            except Exception:
+                # try removing labels if present
+                b = {k:v for k,v in batch.items() if k!='labels'}
+                _ = model(**b)
 
     for h in hooks:
-        h.remove()
+        try:
+            h.remove()
+        except Exception:
+            pass
 
     bi_scores = {}
     for n in block_names:
-        if not activations_in[n] or not activations_out[n]:
+        ins = activations_in.get(n, [])
+        outs = activations_out.get(n, [])
+        if not ins or not outs:
             continue
-        Xin = torch.cat(activations_in[n], dim=0).float()
-        Xout = torch.cat(activations_out[n], dim=0).float()
+        Xin = torch.cat(ins, dim=0).float()
+        Xout = torch.cat(outs, dim=0).float()
         m = min(Xin.shape[0], Xout.shape[0])
         Xin, Xout = Xin[:m], Xout[:m]
         cos = (Xin * Xout).sum(dim=1) / ((Xin.norm(p=2, dim=1) * Xout.norm(p=2, dim=1)).clamp(min=1e-8))
         bi = float(1 - cos.mean().item())
         bi_scores[n] = bi
 
-    names = list(bi_scores.keys())
-    s = np.array([bi_scores[n] for n in names], dtype=float)
-    s = s - s.max()
-    weights = np.exp(s / tau)
-    weights /= weights.sum()
-    r_float = weights * total_rank
-    r_int = np.floor(r_float).astype(int)
-    r_int = np.maximum(r_int, r_min)
-
-    current = r_int.sum()
-    residuals = r_float - r_int
-    if current < total_rank:
-        for i in np.argsort(-residuals)[: total_rank - current]:
-            r_int[i] += 1
-    elif current > total_rank:
-        for i in np.argsort(residuals)[: current - total_rank]:
-            if r_int[i] > r_min:
-                r_int[i] -= 1
-
-    print("\n[Adaptive LoRA] ---- Layer-wise BI Score & Rank ----")
-    for i, name in enumerate(names):
-        print(f"  • {name:<60s}  BI = {bi_scores[name]:.6f}   →   Rank = {r_int[i]:>3d}")
-    print(f"Total allocated rank = {r_int.sum()} / {total_rank}")
-    print("[Adaptive LoRA] ---------------------------------------\n")
-
-    return {names[i]: (bi_scores[names[i]], int(r_int[i])) for i in range(len(names))}
+    # print brief summary
+    print('\n[Adaptive LoRA] BI scores (sample):')
+    for k,v in list(bi_scores.items())[:10]:
+        print(f'  • {k:<60s} BI={v:.6f}')
+    print('[Adaptive LoRA] (full table printed by allocator)\n')
+    return bi_scores

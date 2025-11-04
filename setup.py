@@ -1,9 +1,8 @@
 from setuptools import setup, find_packages
-
 setup(
     name="adaptive_lora",
-    version="1.0.3",
-    description="Dynamic Adaptive LoRA with forced BI printing (on_train_end hook)",
+    version="2.0.0",
+    description="Adaptive LoRA (Option B) - reinitialize LoRA adapters each epoch based on BI scores.",
     packages=find_packages(),
     install_requires=[
         "torch>=1.13",
@@ -11,6 +10,7 @@ setup(
         "peft>=0.3.0",
         "datasets>=2.0",
         "tqdm",
+        "numpy",
         "scikit-learn",
         "accelerate"
     ],

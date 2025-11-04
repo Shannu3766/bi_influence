@@ -1,41 +1,22 @@
 from transformers import TrainerCallback
 from torch.utils.data import DataLoader
-import copy, torch
+import torch
 from .bi_score import compute_bi_scores
-from .rank_allocator import allocate_ranks_softmax
-from .lora_wrapper import apply_adaptive_lora
 
 class AdaptiveLoRACallback(TrainerCallback):
-    def __init__(self, r_min=1, tau=0.5, total_rank=None, recompute_interval=1, val_subset_size=50, val_batch_size=2, smoothing_alpha=0.8, compute_once=False, final_recompute=False):
+    def __init__(self, r_min=1, tau=0.5, total_rank=None, val_subset_size=50, val_batch_size=2):
         self.r_min = r_min
         self.tau = tau
         self.total_rank = total_rank
-        self.recompute_interval = recompute_interval
-        self.smoothing_alpha = smoothing_alpha
         self.val_subset_size = val_subset_size
         self.val_batch_size = val_batch_size
-        self.compute_once = compute_once
-        self.final_recompute = final_recompute
-        self._prev_bi = None
-        self._has_computed_once = False
 
-    def on_log(self, args, state, control, logs=None, **kwargs):
+    def on_train_end(self, args, state, control, **kwargs):
         trainer = kwargs.get("trainer", None)
         if trainer is None or not trainer.is_world_process_zero():
             return control
 
-        current_epoch = int(state.epoch or 0)
-        total_epochs = int(getattr(trainer.args, "num_train_epochs", 0))
-        print(f"[DEBUG] AdaptiveLoRACallback triggered on evaluation at epoch {current_epoch}")
-
-        if self.compute_once and self._has_computed_once:
-            return control
-        if not self.final_recompute and current_epoch == total_epochs:
-            return control
-        if current_epoch % self.recompute_interval != 0:
-            return control
-
-        print(f"\n[Adaptive LoRA] Epoch {current_epoch}/{total_epochs}: recomputing BI + ranks...")
+        print("\n[Adaptive LoRA] Forced BI computation at training end...")
 
         eval_dataset = trainer.eval_dataset
         try:
@@ -47,30 +28,15 @@ class AdaptiveLoRACallback(TrainerCallback):
             small = eval_dataset
 
         val_loader = DataLoader(small, batch_size=self.val_batch_size)
-        model = trainer.model
         device = trainer.args.device if hasattr(trainer.args, "device") else ("cuda" if torch.cuda.is_available() else "cpu")
-        if device.startswith("cuda"):
-            torch.cuda.empty_cache()
-
-        new_bi = compute_bi_scores(model, dataloader=val_loader, device=device, total_rank=self.total_rank or max(64, len(list(model.named_modules()))), tau=self.tau, r_min=self.r_min)
-
-        if self._prev_bi is not None:
-            for k in new_bi:
-                if isinstance(new_bi[k], tuple):
-                    new_bi[k] = new_bi[k][0]
-                new_bi[k] = self.smoothing_alpha * self._prev_bi.get(k, new_bi[k]) + (1 - self.smoothing_alpha) * new_bi[k]
-
-        self._prev_bi = copy.deepcopy(new_bi)
-
-        ranks = allocate_ranks_softmax(new_bi, total_rank=self.total_rank or max(64, len(new_bi)), tau=self.tau, r_min=self.r_min)
-        trainer.model = apply_adaptive_lora(trainer.model, ranks)
 
         if device.startswith("cuda"):
             torch.cuda.empty_cache()
 
-        print(f"[Adaptive LoRA] ✅ Updated ranks for {len(ranks)} layers.\n")
+        _ = compute_bi_scores(trainer.model, dataloader=val_loader, device=device, total_rank=self.total_rank or 64, tau=self.tau, r_min=self.r_min)
 
-        if self.compute_once:
-            self._has_computed_once = True
+        if device.startswith("cuda"):
+            torch.cuda.empty_cache()
 
+        print("[Adaptive LoRA] ✅ BI Scores and Ranks computed and displayed successfully.\n")
         return control

@@ -19,7 +19,7 @@ class AdaptiveLoRACallback(TrainerCallback):
         self._prev_bi = None
         self._has_computed_once = False
 
-    def on_evaluate(self, args, state, control, **kwargs):
+    def on_log(self, args, state, control, logs=None, **kwargs):
         trainer = kwargs.get("trainer", None)
         if trainer is None or not trainer.is_world_process_zero():
             return control

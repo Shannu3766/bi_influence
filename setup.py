@@ -2,8 +2,8 @@ from setuptools import setup, find_packages
 
 setup(
     name="adaptive_lora",
-    version="1.0.0",
-    description="Dynamic Adaptive LoRA with Block Influence scoring and epoch-wise rank adaptation",
+    version="1.0.2",
+    description="Dynamic Adaptive LoRA with BI scoring and automatic rank adaptation (fixed callback)",
     packages=find_packages(),
     install_requires=[
         "torch>=1.13",
@@ -12,7 +12,6 @@ setup(
         "datasets>=2.0",
         "tqdm",
         "scikit-learn",
-        "matplotlib",
         "accelerate"
     ],
 )

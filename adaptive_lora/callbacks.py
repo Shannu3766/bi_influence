@@ -6,11 +6,7 @@ from .rank_allocator import allocate_ranks_softmax
 from .lora_wrapper import apply_adaptive_lora
 
 class AdaptiveLoRACallback(TrainerCallback):
-    """Recomputes BI scores and applies adaptive LoRA ranks each epoch."""
-    def __init__(self, r_min=1, tau=0.5, total_rank=None,
-                 recompute_interval=1, val_subset_size=50,
-                 val_batch_size=2, smoothing_alpha=0.8,
-                 compute_once=False, final_recompute=False):
+    def __init__(self, r_min=1, tau=0.5, total_rank=None, recompute_interval=1, val_subset_size=50, val_batch_size=2, smoothing_alpha=0.8, compute_once=False, final_recompute=False):
         self.r_min = r_min
         self.tau = tau
         self.total_rank = total_rank
@@ -23,25 +19,24 @@ class AdaptiveLoRACallback(TrainerCallback):
         self._prev_bi = None
         self._has_computed_once = False
 
-    def on_epoch_end(self, args, state, control, **kwargs):
+    def on_evaluate(self, args, state, control, **kwargs):
         trainer = kwargs.get("trainer", None)
         if trainer is None or not trainer.is_world_process_zero():
             return control
 
-        epoch = int(state.epoch or 0)
+        current_epoch = int(state.epoch or 0)
         total_epochs = int(getattr(trainer.args, "num_train_epochs", 0))
+        print(f"[DEBUG] AdaptiveLoRACallback triggered on evaluation at epoch {current_epoch}")
 
-        # Skip conditions
         if self.compute_once and self._has_computed_once:
             return control
-        if not self.final_recompute and epoch == total_epochs:
+        if not self.final_recompute and current_epoch == total_epochs:
             return control
-        if epoch % self.recompute_interval != 0:
+        if current_epoch % self.recompute_interval != 0:
             return control
 
-        print(f"\n[Adaptive LoRA] Epoch {epoch}/{total_epochs}: recomputing BI + ranks...")
+        print(f"\n[Adaptive LoRA] Epoch {current_epoch}/{total_epochs}: recomputing BI + ranks...")
 
-        # Build small val loader
         eval_dataset = trainer.eval_dataset
         try:
             if hasattr(eval_dataset, "select"):
@@ -54,41 +49,28 @@ class AdaptiveLoRACallback(TrainerCallback):
         val_loader = DataLoader(small, batch_size=self.val_batch_size)
         model = trainer.model
         device = trainer.args.device if hasattr(trainer.args, "device") else ("cuda" if torch.cuda.is_available() else "cpu")
-
         if device.startswith("cuda"):
             torch.cuda.empty_cache()
 
-        # Compute BI scores
-        new_bi = compute_bi_scores(
-    model,
-    dataloader=val_loader,
-    device=device,
-    total_rank=self.total_rank or max(64, len(list(model.named_modules()))),
-    tau=self.tau,
-    r_min=self.r_min,
-)
+        new_bi = compute_bi_scores(model, dataloader=val_loader, device=device, total_rank=self.total_rank or max(64, len(list(model.named_modules()))), tau=self.tau, r_min=self.r_min)
 
-
-        # Smooth scores
         if self._prev_bi is not None:
             for k in new_bi:
+                if isinstance(new_bi[k], tuple):
+                    new_bi[k] = new_bi[k][0]
                 new_bi[k] = self.smoothing_alpha * self._prev_bi.get(k, new_bi[k]) + (1 - self.smoothing_alpha) * new_bi[k]
+
         self._prev_bi = copy.deepcopy(new_bi)
 
-        # Allocate & print ranks
-        ranks = allocate_ranks_softmax(
-            new_bi,
-            total_rank=self.total_rank or max(64, len(new_bi)),
-            tau=self.tau,
-            r_min=self.r_min,
-        )
-
+        ranks = allocate_ranks_softmax(new_bi, total_rank=self.total_rank or max(64, len(new_bi)), tau=self.tau, r_min=self.r_min)
         trainer.model = apply_adaptive_lora(trainer.model, ranks)
 
         if device.startswith("cuda"):
             torch.cuda.empty_cache()
 
         print(f"[Adaptive LoRA] ✅ Updated ranks for {len(ranks)} layers.\n")
+
         if self.compute_once:
             self._has_computed_once = True
+
         return control

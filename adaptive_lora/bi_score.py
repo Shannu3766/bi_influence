@@ -1,20 +1,37 @@
 import torch
 from tqdm import tqdm
+import numpy as np
 
 def _flatten_tensor(t):
     return t.detach().cpu().reshape(t.shape[0], -1)
 
-def compute_bi_scores(model, tokenizer=None, dataloader=None, device="cuda"):
+def compute_bi_scores(model, tokenizer=None, dataloader=None, device="cuda", total_rank=64, tau=0.5, r_min=1):
+    """
+    Computes Block Influence (BI) scores for attention layers and allocates LoRA ranks.
+    Prints BI + rank side-by-side for each layer.
+
+    Args:
+        model: Hugging Face model
+        dataloader: validation loader
+        device: "cuda" or "cpu"
+        total_rank: total LoRA rank budget
+        tau: temperature for softmax allocation
+        r_min: minimum allowed rank
+    """
     model.to(device)
     model.eval()
+
+    # Collect only attention modules
     block_names = []
     for name, _ in model.named_modules():
         if any(x in name.lower() for x in ["self_attn", "attention", "attn"]):
             block_names.append(name)
     block_names = list(dict.fromkeys(block_names))
+
     activations_in = {n: [] for n in block_names}
     activations_out = {n: [] for n in block_names}
     hooks = []
+
     def hook_fn(name):
         def fn(mod, inp, outp):
             if inp is None or (isinstance(inp, (tuple, list)) and len(inp) == 0):
@@ -29,16 +46,23 @@ def compute_bi_scores(model, tokenizer=None, dataloader=None, device="cuda"):
             except Exception:
                 pass
         return fn
+
+    # Register forward hooks
     for n in block_names:
         mod = dict(model.named_modules()).get(n, None)
         if mod is not None:
             hooks.append(mod.register_forward_hook(hook_fn(n)))
+
+    # Forward pass
     with torch.no_grad():
-        for batch in tqdm(dataloader, desc="[Adaptive LoRA] Computing BI"):
+        for batch in tqdm(dataloader, desc="[Adaptive LoRA] Computing BI scores"):
             batch = {k: v.to(device) if hasattr(v, "to") else v for k, v in batch.items()}
             _ = model(**batch)
+
     for h in hooks:
         h.remove()
+
+    # Compute BI scores
     bi_scores = {}
     for n in block_names:
         if not activations_in[n] or not activations_out[n]:
@@ -48,5 +72,34 @@ def compute_bi_scores(model, tokenizer=None, dataloader=None, device="cuda"):
         m = min(Xin.shape[0], Xout.shape[0])
         Xin, Xout = Xin[:m], Xout[:m]
         cos = (Xin * Xout).sum(dim=1) / ((Xin.norm(p=2, dim=1) * Xout.norm(p=2, dim=1)).clamp(min=1e-8))
-        bi_scores[n] = float(1 - cos.mean().item())
-    return bi_scores
+        bi = float(1 - cos.mean().item())
+        bi_scores[n] = bi
+
+    # Compute ranks from BI scores using softmax
+    names = list(bi_scores.keys())
+    s = np.array([bi_scores[n] for n in names], dtype=float)
+    s = s - s.max()
+    weights = np.exp(s / tau)
+    weights /= weights.sum()
+    r_float = weights * total_rank
+    r_int = np.floor(r_float).astype(int)
+    r_int = np.maximum(r_int, r_min)
+    current = r_int.sum()
+    residuals = r_float - r_int
+    if current < total_rank:
+        for i in np.argsort(-residuals)[: total_rank - current]:
+            r_int[i] += 1
+    elif current > total_rank:
+        for i in np.argsort(residuals)[: current - total_rank]:
+            if r_int[i] > r_min:
+                r_int[i] -= 1
+
+    # Print combined summary
+    print("\\n[Adaptive LoRA] ---- Layer-wise BI Score and Rank ----")
+    for i, name in enumerate(names):
+        print(f"  • {name:<60s}  BI = {bi_scores[name]:.6f}   →   Rank = {r_int[i]:>3d}")
+    print(f"Total allocated rank = {r_int.sum()} / {total_rank}")
+    print("[Adaptive LoRA] ---------------------------------------\\n")
+
+    # Return both for logging or reuse
+    return {names[i]: (bi_scores[names[i]], int(r_int[i])) for i in range(len(names))}

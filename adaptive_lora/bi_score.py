@@ -29,11 +29,17 @@ def compute_bi_scores(model, tokenizer=None, dataloader=None, device="cuda"):
     model.eval()
 
     # Identify blocks by heuristic (layer, block, encoder, decoder, etc.)
+    # block_names = []
+    # for name, _ in model.named_modules():
+    #     if any(x in name.lower() for x in ["layer", "block", "encoder", "decoder"]):
+    #         block_names.append(name)
+    # block_names = list(dict.fromkeys(block_names))  # dedupe
+
     block_names = []
     for name, _ in model.named_modules():
-        if any(x in name.lower() for x in ["layer", "block", "encoder", "decoder"]):
+        if any(x in name.lower() for x in ["self_attn", "attention", "attn"]):
             block_names.append(name)
-    block_names = list(dict.fromkeys(block_names))  # dedupe
+    block_names = list(dict.fromkeys(block_names))
 
     activations_in = {n: [] for n in block_names}
     activations_out = {n: [] for n in block_names}

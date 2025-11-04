@@ -39,12 +39,29 @@ def compute_bi_scores(model, tokenizer=None, dataloader=None, device="cuda"):
     activations_out = {n: [] for n in block_names}
     hooks = []
 
+    # def hook_fn(name):
+    #     def fn(mod, inp, outp):
+    #         inp = inp[0] if isinstance(inp, (tuple, list)) else inp
+    #         activations_in[name].append(_flatten_tensor(inp))
+    #         activations_out[name].append(_flatten_tensor(outp))
+    #     return fn
     def hook_fn(name):
         def fn(mod, inp, outp):
-            inp = inp[0] if isinstance(inp, (tuple, list)) else inp
-            activations_in[name].append(_flatten_tensor(inp))
-            activations_out[name].append(_flatten_tensor(outp))
+            # Guard against empty or non-tensor inputs
+            if inp is None or (isinstance(inp, (tuple, list)) and len(inp) == 0):
+                return
+            if isinstance(inp, (tuple, list)):
+                inp = inp[0]
+            if not torch.is_tensor(inp) or not torch.is_tensor(outp):
+                return
+            try:
+                activations_in[name].append(_flatten_tensor(inp))
+                activations_out[name].append(_flatten_tensor(outp))
+            except Exception as e:
+                # Skip if dimension mismatch or unusual tensor shape
+                pass
         return fn
+
 
     for n in block_names:
         mod = dict(model.named_modules()).get(n, None)

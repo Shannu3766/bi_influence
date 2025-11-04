@@ -59,7 +59,15 @@ class AdaptiveLoRACallback(TrainerCallback):
             torch.cuda.empty_cache()
 
         # Compute BI scores
-        new_bi = compute_bi_scores(model, dataloader=val_loader, device=device)
+        new_bi = compute_bi_scores(
+    model,
+    dataloader=val_loader,
+    device=device,
+    total_rank=self.total_rank or max(64, len(list(model.named_modules()))),
+    tau=self.tau,
+    r_min=self.r_min,
+)
+
 
         # Smooth scores
         if self._prev_bi is not None:

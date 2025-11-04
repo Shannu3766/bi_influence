@@ -47,7 +47,15 @@ class AdaptiveLoRACallback(TrainerCallback):
         device = trainer.args.device if hasattr(trainer.args, "device") else ("cuda" if torch.cuda.is_available() else "cpu")
         if device.startswith("cuda"):
             torch.cuda.empty_cache()
-        new_bi = compute_bi_scores(model, tokenizer=trainer.tokenizer, dataloader=val_loader, device=device)
+        new_bi = compute_bi_scores(
+            model,
+            tokenizer=trainer.tokenizer,
+            dataloader=val_loader,
+            device=device,
+            total_rank=self.total_rank or max(64, len(list(model.named_modules()))),
+            tau=self.tau,
+            r_min=self.r_min,
+            )
         if self._prev_bi is not None:
             for k in new_bi:
                 new_bi[k] = self.smoothing_alpha * self._prev_bi.get(k, new_bi[k]) + (1 - self.smoothing_alpha) * new_bi[k]

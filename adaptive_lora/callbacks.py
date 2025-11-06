@@ -102,19 +102,30 @@ class AdaptiveLoRACallback(TrainerCallback):
                     print(f"  - {name}: r={current_rank} -> {new_rank} "
                           f"(Score: {scores.get(name, 0):.4f})")
                 
-                # Handle lora_dropout (it's a ModuleDict)
-                if 'default' in layer.lora_dropout:
-                    lora_dropout_p = layer.lora_dropout['default'].p
-                
-                # This is the key PEFT function to resize the adapter
-                layer.update_layer(
-                    adapter_name='default',
-                    r=new_rank,
-                    lora_alpha=layer.lora_alpha.get('default', 1),
-                    lora_dropout=lora_dropout_p,
-                    init_lora_weights=init_lora_weights,
-                    use_rslora=use_rslora  # <-- THE FINAL FIX
-                )
+                # --- THIS IS THE FIX ---
+                if new_rank == 0:
+                    # Rank 0 means disabling the adapter.
+                    # We can't call update_layer(r=0) as PEFT forbids it.
+                    layer.r['default'] = 0
+                    layer.disable_adapters = True # Disable this layer
+                else:
+                    # Rank > 0, so we enable and update the adapter.
+                    layer.disable_adapters = False # Ensure layer is enabled
+                    
+                    # Handle lora_dropout (it's a ModuleDict)
+                    if 'default' in layer.lora_dropout:
+                        lora_dropout_p = layer.lora_dropout['default'].p
+                    
+                    # This is the key PEFT function to resize the adapter
+                    layer.update_layer(
+                        adapter_name='default',
+                        r=new_rank,
+                        lora_alpha=layer.lora_alpha.get('default', 1),
+                        lora_dropout=lora_dropout_p,
+                        init_lora_weights=init_lora_weights,
+                        use_rslora=use_rslora
+                    )
+                # --- END FIX ---
                 
             elif self.verbose:
                 print(f"  - {name}: r={new_rank} (Unchanged)")

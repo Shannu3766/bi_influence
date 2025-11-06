@@ -1,5 +1,9 @@
 import torch
 from typing import Dict
+import logging
+
+# Get a logger
+logger = logging.getLogger(__name__)
 
 def allocate_ranks_bi(
     scores: Dict[str, float], 
@@ -18,7 +22,7 @@ def allocate_ranks_bi(
         total_rank: The total rank budget R to distribute.
         tau: Temperature parameter τ to sharpen or soften the distribution.
              (τ < 1 sharpens, τ > 1 softens).
-        min_rank: The minimum rank to assign to each layer.
+        min_rank: The *desired* minimum rank to assign to each layer.
 
     Returns:
         A dictionary of {layer_name: allocated_rank}.
@@ -27,7 +31,37 @@ def allocate_ranks_bi(
         return {}
 
     num_layers = len(scores)
+    
+    # --- NEW ROBUSTNESS CHECK ---
+    required_min_budget = num_layers * min_rank
+    
+    if total_rank < required_min_budget:
+        # The requested min_rank is impossible with the total_rank budget.
+        # We must lower the min_rank to what is possible.
+        
+        # Calculate the highest possible integer min_rank
+        effective_min_rank = max(0, int(torch.floor(torch.tensor(total_rank / num_layers)).item()))
+        
+        logger.warning(
+            f"Total rank {total_rank} is less than the required minimum budget "
+            f"({required_min_budget} = {num_layers} layers * {min_rank} min_rank). "
+            f"Forcing a lower effective min_rank of {effective_min_rank} for all layers."
+        )
+        
+        # Overwrite the user's requested min_rank with the possible one
+        min_rank = effective_min_rank 
+        
+        if min_rank == 0:
+             logger.warning(
+                f"Total rank {total_rank} is less than the number of layers ({num_layers}). "
+                f"Some layers will be assigned a rank of 0."
+             )
+    # --- END NEW CHECK ---
+
+
     if total_rank < num_layers * min_rank:
+        # This check is now redundant but kept as a final safeguard.
+        # It should never be hit if the logic above is correct.
         raise ValueError(
             f"Total rank {total_rank} is less than the minimum required "
             f"({num_layers} layers * {min_rank} min_rank = {num_layers * min_rank})."

@@ -130,7 +130,9 @@ class AdaptiveLoRACallback(TrainerCallback):
                         layer.r["default"] = new_rank
             else:
                 if self.verbose:
-                    print(f"  - {name}: r={new_rank} (Unchanged)")
+                    print(
+                        f"  - {name}: r={new_rank} (rank Unchanged, Score: {scores.get(name, 0):.4f})"
+                    )
 
         # 4️⃣ Log epoch summary
         save_epoch_log(self.log_file, epoch, new_ranks, scores)

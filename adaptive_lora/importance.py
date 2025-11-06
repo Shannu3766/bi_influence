@@ -57,24 +57,57 @@ def compute_bi_scores(model: torch.nn.Module, dataloader: DataLoader, device: to
             hook.remove()
 
     # 🧮 Compute BI scores
+    # bi_scores = {}
+    # for name in lora_layers:
+    #     if not activations[name]['in'] or not activations[name]['out']:
+    #         logger.warning(f"No activations captured for {name}. Skipping.")
+    #         continue
+
+    #     in_acts = torch.cat(activations[name]['in'])
+    #     out_acts = torch.cat(activations[name]['out'])
+
+    #     in_flat = in_acts.view(-1, in_acts.size(-1))
+    #     out_flat = out_acts.view(-1, out_acts.size(-1))
+
+    #     # compute cosine similarity
+    #     cos_sim = F.cosine_similarity(in_flat, out_flat, dim=1)
+    #     cos_sim = torch.clamp(cos_sim, -1.0, 1.0)  # avoid >1 or <−1 numerical issues
+
+    #     avg_cos_sim = cos_sim.mean().item()
+    #     bi_scores[name] = 1.0 - avg_cos_sim  # higher → more influential
+
+    # model.train()
+    # return bi_scores
+        # --- Compute BI scores ---
     bi_scores = {}
     for name in lora_layers:
         if not activations[name]['in'] or not activations[name]['out']:
-            logger.warning(f"No activations captured for {name}. Skipping.")
+            logger.warning(f"No activations captured for layer {name}. Skipping.")
             continue
 
-        in_acts = torch.cat(activations[name]['in'])
-        out_acts = torch.cat(activations[name]['out'])
+        try:
+            in_acts = torch.cat(activations[name]['in'])
+            out_acts = torch.cat(activations[name]['out'])
 
-        in_flat = in_acts.view(-1, in_acts.size(-1))
-        out_flat = out_acts.view(-1, out_acts.size(-1))
+            in_flat = in_acts.view(in_acts.size(0), -1)
+            out_flat = out_acts.view(out_acts.size(0), -1)
 
-        # compute cosine similarity
-        cos_sim = F.cosine_similarity(in_flat, out_flat, dim=1)
-        cos_sim = torch.clamp(cos_sim, -1.0, 1.0)  # avoid >1 or <−1 numerical issues
+            # Match feature dims for cosine similarity
+            min_dim = min(in_flat.shape[1], out_flat.shape[1])
+            if in_flat.shape[1] != out_flat.shape[1]:
+                in_proj = in_flat[:, :min_dim]
+                out_proj = out_flat[:, :min_dim]
+            else:
+                in_proj, out_proj = in_flat, out_flat
 
-        avg_cos_sim = cos_sim.mean().item()
-        bi_scores[name] = 1.0 - avg_cos_sim  # higher → more influential
+            cos_sim = F.cosine_similarity(in_proj, out_proj, dim=1)
+            cos_sim = torch.clamp(cos_sim, -1.0, 1.0)
 
+            avg_cos_sim = cos_sim.mean().item()
+            bi_scores[name] = 1.0 - avg_cos_sim
+
+        except Exception as e:
+            logger.error(f"Error computing BI for {name}: {e}")
+            bi_scores[name] = 0.0
     model.train()
     return bi_scores

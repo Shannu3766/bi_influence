@@ -6,50 +6,82 @@ import logging
 from typing import Dict
 
 logger = logging.getLogger(__name__)
-import torch
-import torch.nn.functional as F
 
-def compute_bi_scores(model, dataloader, device):
+def compute_bi_scores(model: torch.nn.Module, dataloader: DataLoader, device: torch.device) -> Dict[str, float]:
+    """
+    Computes Block Influence (BI) scores for each LoRA layer using
+    cosine similarity between mean input/output representations.
+
+    Uses dimension-safe pooling to handle layers with different in/out shapes.
+    """
     model.eval()
     lora_layers = get_lora_layers(model)
+    if not lora_layers:
+        logger.warning("No LoRA layers found in model. Returning empty scores.")
+        return {}
+
     activations = {name: {'in': [], 'out': []} for name in lora_layers}
 
     def make_hook(name):
         def hook(module, inp, out):
-            activations[name]['in'].append(inp[0].detach().cpu().float())
-            activations[name]['out'].append(out.detach().cpu().float())
+            x_in = inp[0].detach().to("cpu", torch.float32)
+            x_out = out.detach().to("cpu", torch.float32)
+
+            # Flatten batch & sequence, keep feature dim last
+            x_in = x_in.view(-1, x_in.shape[-1])
+            x_out = x_out.view(-1, x_out.shape[-1])
+
+            # Mean-pool to handle mismatched dims safely
+            in_mean = x_in.mean(dim=0)
+            out_mean = x_out.mean(dim=0)
+
+            # Store mean representations (safe for cosine)
+            activations[name]['in'].append(in_mean)
+            activations[name]['out'].append(out_mean)
         return hook
 
     hooks = [layer.register_forward_hook(make_hook(name)) for name, layer in lora_layers.items()]
 
     try:
-        batch = next(iter(dataloader))
-        batch = {k: v.to(device) for k, v in batch.items() if isinstance(v, torch.Tensor)}
-        with torch.no_grad():
-            model(**batch)
+        num_batches = min(3, len(dataloader))
+        iterator = iter(dataloader)
+        for _ in range(num_batches):
+            batch = next(iterator)
+            batch = {k: v.to(device) for k, v in batch.items() if isinstance(v, torch.Tensor)}
+            with torch.no_grad():
+                model(**batch)
+    except Exception as e:
+        logger.error(f"Error during BI score computation: {e}")
     finally:
         for h in hooks:
             h.remove()
 
     bi_scores = {}
+    eps = 1e-8
     for name in lora_layers:
         if not activations[name]['in'] or not activations[name]['out']:
             continue
 
-        x_in = torch.cat(activations[name]['in'])
-        x_out = torch.cat(activations[name]['out'])
+        # Average across batches
+        x_in = torch.stack(activations[name]['in']).mean(dim=0)
+        x_out = torch.stack(activations[name]['out']).mean(dim=0)
 
-        # Flatten to [N, D]
-        x_in = x_in.view(-1, x_in.size(-1))
-        x_out = x_out.view(-1, x_out.size(-1))
+        # Match dimensions by truncation or padding
+        if x_in.shape[0] != x_out.shape[0]:
+            min_dim = min(x_in.shape[0], x_out.shape[0])
+            x_in = x_in[:min_dim]
+            x_out = x_out[:min_dim]
 
-        # Compute mean cosine similarity ρ_i
-        rho = F.cosine_similarity(x_in, x_out, dim=1).mean().item()
+        # Cosine similarity
+        rho = F.cosine_similarity(x_in.unsqueeze(0), x_out.unsqueeze(0)).mean().item()
+        bi = 1.0 - rho  # BI = 1 - cosine similarity
 
-        # Compute BI score s_i = 1 - ρ_i
-        bi_scores[name] = 1.0 - rho
+        bi_scores[name] = bi
 
-    # Normalize to [0, 1]
+    # Normalize scores across layers
     s = torch.tensor(list(bi_scores.values()))
-    s_norm = (s - s.min()) / (s.max() - s.min() + 1e-8)
-    return {k: float(v) for k, v in zip(bi_scores.keys(), s_norm)}
+    s_norm = (s - s.min()) / (s.max() - s.min() + eps)
+    bi_scores = {k: float(v) for k, v in zip(bi_scores.keys(), s_norm)}
+
+    model.train()
+    return bi_scores

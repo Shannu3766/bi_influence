@@ -96,20 +96,24 @@ class AdaptiveLoRACallback(TrainerCallback):
                     print(f"  - {name}: r={current_rank} -> {new_rank} "
                           f"(Score: {scores.get(name, 0):.4f})")
                 
-                # --- FIX IS HERE ---
-                # layer.lora_dropout is a ModuleDict, not a dict.
-                # We access the 'default' adapter's module, then its '.p' attribute.
+                # --- FIX #1: Handle lora_dropout ---
                 lora_dropout_p = 0.0
                 if 'default' in layer.lora_dropout:
                     lora_dropout_p = layer.lora_dropout['default'].p
+                
+                # --- FIX #2 (This Error): Handle init_lora_weights ---
+                # This value is stored in the adapter's config, not on the layer.
+                init_lora_weights = True # Default fallback
+                if 'default' in layer.peft_config:
+                    init_lora_weights = layer.peft_config['default'].init_lora_weights
                 
                 # This is the key PEFT function to resize the adapter
                 layer.update_layer(
                     adapter_name='default',
                     r=new_rank,
                     lora_alpha=layer.lora_alpha.get('default', 1),
-                    lora_dropout=lora_dropout_p, # Pass the float value
-                    init_lora_weights=layer.init_lora_weights
+                    lora_dropout=lora_dropout_p,
+                    init_lora_weights=init_lora_weights # Pass the value from the config
                 )
                 # --- END FIX ---
                 

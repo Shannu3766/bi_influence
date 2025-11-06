@@ -13,9 +13,9 @@ class AdaptiveLoRACallback(TrainerCallback):
     A Hugging Face TrainerCallback that implements per-epoch adaptive
     LoRA rank allocation based on Block Influence (BI) scores (Algorithm 2).
     """
-    
+
     def __init__(
-        self, 
+        self,
         total_rank: int,
         val_dataloader: DataLoader,
         tau: float = 1.0,
@@ -36,17 +36,20 @@ class AdaptiveLoRACallback(TrainerCallback):
         self.tau = tau
         self.log_file = os.path.join(log_path, "adaptive_lora_epoch_logs.csv")
         self.verbose = verbose
-        
+
         # Ensure log directory exists
         if log_path and not os.path.exists(log_path):
             os.makedirs(log_path, exist_ok=True)
 
+    # ============================================================
+    # 🔁 EPOCH-END HOOK
+    # ============================================================
     def on_epoch_end(
-        self, 
-        args: TrainingArguments, 
-        state: TrainerState, 
-        control: TrainerControl, 
-        model, # This 'model' is the PeftModel
+        self,
+        args: TrainingArguments,
+        state: TrainerState,
+        control: TrainerControl,
+        model,  # This 'model' is the PEFT model
         **kwargs
     ):
         """
@@ -58,42 +61,49 @@ class AdaptiveLoRACallback(TrainerCallback):
 
         device = next(model.parameters()).device
 
-        # 1. Compute BI Scores (Algorithm 2, lines 4-11)
-        if self.verbose: print("Computing BI importance scores...")
+        # ============================================================
+        # 1️⃣ Compute BI Scores (Algorithm 2, lines 4–11)
+        # ============================================================
+        if self.verbose:
+            print("Computing BI importance scores...")
+
         scores = compute_bi_scores(model, self.val_dataloader, device)
-        
         if not scores:
-            if self.verbose: print("No LoRA layers found or scores computed. Skipping update.")
+            if self.verbose:
+                print("No LoRA layers found or BI scores computed. Skipping update.")
             return
 
-        # 2. Allocate Ranks (Algorithm 2, lines 12-14)
-        if self.verbose: print("Allocating new ranks...")
-        new_ranks = allocate_ranks_bi(
-            scores, 
-            self.total_rank, 
-            self.tau 
-        )
+        # ============================================================
+        # 2️⃣ Allocate Ranks (Algorithm 2, lines 12–14)
+        # ============================================================
+        if self.verbose:
+            print("Allocating new ranks...")
 
-        # 3. Update LoRA Adapter Modules
-        if self.verbose: print("Applying new ranks to LoRA modules...")
+        new_ranks = allocate_ranks_bi(scores, self.total_rank, self.tau)
+
+        # ============================================================
+        # 3️⃣ Update LoRA Adapter Modules
+        # ============================================================
+        if self.verbose:
+            print("Applying new ranks to LoRA modules...")
+
         lora_layers = get_lora_layers(model)
-        
-        # --- Pre-fetch all PEFT configs ---
+
+        # Retrieve PEFT configuration
         config = model.peft_config.get('default')
         if not config:
             logger.error("Could not find 'default' PEFT config. Skipping update.")
             return
 
-        # Use getattr for safety with different PEFT versions
+        # Gather LoRA configuration parameters
         init_lora_weights = getattr(config, 'init_lora_weights', True)
         use_rslora = getattr(config, 'use_rslora', False)
         use_dora = getattr(config, 'use_dora', False)
         use_qalora = getattr(config, 'use_qalora', False)
-        lora_bias = getattr(config, 'bias', 'none') # 'bias' is the config name
+        lora_bias = getattr(config, 'bias', 'none')
         qalora_group_size = getattr(config, 'qalora_group_size', 64)
-        
-        lora_dropout_p = 0.0 # Will be fetched per-layer
-        
+
+        # Iterate over LoRA layers and update their ranks
         for name, layer in lora_layers.items():
             new_rank = new_ranks.get(name)
             if new_rank is None:
@@ -101,45 +111,62 @@ class AdaptiveLoRACallback(TrainerCallback):
                 continue
 
             current_rank = layer.r.get('default', 0)
-            
-            # Only update if the rank has actually changed
+
             if current_rank != new_rank:
                 if self.verbose:
                     print(f"  - {name}: r={current_rank} -> {new_rank} "
                           f"(Score: {scores.get(name, 0):.4f})")
-                
-                # --- THIS IS THE FIX ---
-                if new_rank == 0:
-                    # Handle r=0: just set the rank in the dict.
-                    # The forward pass will check `if r > 0` and skip.
-                    layer.r['default'] = 0
-                else:
-                    # Rank > 0, so we can safely call update_layer.
-                    
-                    # Handle lora_dropout (it's a ModuleDict)
-                    if 'default' in layer.lora_dropout:
-                        lora_dropout_p = layer.lora_dropout['default'].p
-                    
-                    # Call update_layer with ALL required arguments
-                    layer.update_layer(
-                        adapter_name='default',
-                        r=new_rank,
-                        lora_alpha=layer.lora_alpha.get('default', 1),
-                        lora_dropout=lora_dropout_p,
-                        init_lora_weights=init_lora_weights,
-                        use_rslora=use_rslora,
-                        use_dora=use_dora,
-                        use_qalora=use_qalora,
-                        lora_bias=lora_bias,
-                        qalora_group_size=qalora_group_size
-                    )
-                # --- END FIX ---
-                
-            elif self.verbose:
-                print(f"  - {name}: r={new_rank} (Unchanged)")
 
-        # 4. Log Results
+                # =====================================================
+                # Handle rank = 0 (disable LoRA)
+                # =====================================================
+                if new_rank == 0:
+                    # Set the rank to zero; LoRA will be bypassed automatically
+                    layer.r['default'] = 0
+
+                    # Optionally, zero out LoRA weights and freeze them
+                    try:
+                        for p_name, p in layer.named_parameters(recurse=False):
+                            if 'lora' in p_name or 'A' in p_name or 'B' in p_name:
+                                p.data.zero_()
+                                p.requires_grad = False
+                    except Exception as e:
+                        logger.warning(f"Warning: Failed to zero LoRA params in {name}: {e}")
+
+                # =====================================================
+                # Handle rank > 0 (enable/update LoRA)
+                # =====================================================
+                else:
+                    # Determine dropout probability if available
+                    lora_dropout_p = 0.0
+                    if hasattr(layer, 'lora_dropout') and 'default' in layer.lora_dropout:
+                        lora_dropout_p = layer.lora_dropout['default'].p
+
+                    # Update layer with new rank configuration
+                    if hasattr(layer, 'update_layer'):
+                        layer.update_layer(
+                            adapter_name='default',
+                            r=new_rank,
+                            lora_alpha=layer.lora_alpha.get('default', 1),
+                            lora_dropout=lora_dropout_p,
+                            init_lora_weights=init_lora_weights,
+                            use_rslora=use_rslora,
+                            use_dora=use_dora,
+                            use_qalora=use_qalora,
+                            lora_bias=lora_bias,
+                            qalora_group_size=qalora_group_size
+                        )
+                    else:
+                        # Fallback if update_layer doesn't exist
+                        layer.r['default'] = new_rank
+            else:
+                if self.verbose:
+                    print(f"  - {name}: r={new_rank} (Unchanged)")
+
+        # ============================================================
+        # 4️⃣ Log Results
+        # ============================================================
         save_epoch_log(self.log_file, epoch, new_ranks, scores)
-        
+
         if self.verbose:
             print(f"--- AdaptiveLoRA: Update complete. Logs saved to {self.log_file} ---")

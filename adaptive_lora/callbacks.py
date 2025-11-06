@@ -78,15 +78,21 @@ class AdaptiveLoRACallback(TrainerCallback):
         if self.verbose: print("Applying new ranks to LoRA modules...")
         lora_layers = get_lora_layers(model)
         
-        # --- Get adapter config from the main model ---
-        lora_dropout_p = 0.0
-        init_lora_weights = True
-        use_rslora = False
+        # --- Pre-fetch all PEFT configs ---
+        config = model.peft_config.get('default')
+        if not config:
+            logger.error("Could not find 'default' PEFT config. Skipping update.")
+            return
+
+        # Use getattr for safety with different PEFT versions
+        init_lora_weights = getattr(config, 'init_lora_weights', True)
+        use_rslora = getattr(config, 'use_rslora', False)
+        use_dora = getattr(config, 'use_dora', False)
+        use_qalora = getattr(config, 'use_qalora', False)
+        lora_bias = getattr(config, 'bias', 'none') # 'bias' is the config name
+        qalora_group_size = getattr(config, 'qalora_group_size', 64)
         
-        if 'default' in model.peft_config:
-            config = model.peft_config['default']
-            init_lora_weights = config.init_lora_weights
-            use_rslora = config.use_rslora
+        lora_dropout_p = 0.0 # Will be fetched per-layer
         
         for name, layer in lora_layers.items():
             new_rank = new_ranks.get(name)
@@ -104,26 +110,28 @@ class AdaptiveLoRACallback(TrainerCallback):
                 
                 # --- THIS IS THE FIX ---
                 if new_rank == 0:
-                    # Rank 0 means disabling the adapter.
-                    # We can't call update_layer(r=0) as PEFT forbids it.
+                    # Handle r=0: just set the rank in the dict.
+                    # The forward pass will check `if r > 0` and skip.
                     layer.r['default'] = 0
-                    layer.disable_adapters = True # Disable this layer
                 else:
-                    # Rank > 0, so we enable and update the adapter.
-                    layer.disable_adapters = False # Ensure layer is enabled
+                    # Rank > 0, so we can safely call update_layer.
                     
                     # Handle lora_dropout (it's a ModuleDict)
                     if 'default' in layer.lora_dropout:
                         lora_dropout_p = layer.lora_dropout['default'].p
                     
-                    # This is the key PEFT function to resize the adapter
+                    # Call update_layer with ALL required arguments
                     layer.update_layer(
                         adapter_name='default',
                         r=new_rank,
                         lora_alpha=layer.lora_alpha.get('default', 1),
                         lora_dropout=lora_dropout_p,
                         init_lora_weights=init_lora_weights,
-                        use_rslora=use_rslora
+                        use_rslora=use_rslora,
+                        use_dora=use_dora,
+                        use_qalora=use_qalora,
+                        lora_bias=lora_bias,
+                        qalora_group_size=qalora_group_size
                     )
                 # --- END FIX ---
                 

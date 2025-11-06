@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 class AdaptiveLoRACallback(TrainerCallback):
     """
     A Hugging Face TrainerCallback that implements per-epoch adaptive
-    LoRA rank allocation based on Block Influence (BI) scores (Algorithm 2). 
+    LoRA rank allocation based on Block Influence (BI) scores (Algorithm 2).
     """
     
     def __init__(
@@ -26,10 +26,10 @@ class AdaptiveLoRACallback(TrainerCallback):
     ):
         """
         Args:
-            total_rank: The total rank budget R to distribute. 
+            total_rank: The total rank budget R to distribute.
             val_dataloader: A DataLoader for a (small) subset of the validation data
-                            used to compute BI scores. 
-            tau: Temperature for softmax allocation. 
+                            used to compute BI scores.
+            tau: Temperature for softmax allocation.
             log_path: Directory to save the CSV logs.
             verbose: If True, prints a summary of rank changes each epoch.
         """
@@ -96,14 +96,23 @@ class AdaptiveLoRACallback(TrainerCallback):
                     print(f"  - {name}: r={current_rank} -> {new_rank} "
                           f"(Score: {scores.get(name, 0):.4f})")
                 
+                # --- FIX IS HERE ---
+                # layer.lora_dropout is a ModuleDict, not a dict.
+                # We access the 'default' adapter's module, then its '.p' attribute.
+                lora_dropout_p = 0.0
+                if 'default' in layer.lora_dropout:
+                    lora_dropout_p = layer.lora_dropout['default'].p
+                
                 # This is the key PEFT function to resize the adapter
                 layer.update_layer(
                     adapter_name='default',
                     r=new_rank,
                     lora_alpha=layer.lora_alpha.get('default', 1),
-                    lora_dropout=layer.lora_dropout.get('default', 0.0),
+                    lora_dropout=lora_dropout_p, # Pass the float value
                     init_lora_weights=layer.init_lora_weights
                 )
+                # --- END FIX ---
+                
             elif self.verbose:
                 print(f"  - {name}: r={new_rank} (Unchanged)")
 

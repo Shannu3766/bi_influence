@@ -1,118 +1,3 @@
-# import torch
-# import torch.nn.functional as F
-# from torch.utils.data import DataLoader
-# from .utils import get_lora_layers
-# import logging
-# from typing import Dict
-
-# logger = logging.getLogger(__name__)
-
-# def compute_bi_scores(model: torch.nn.Module, dataloader: DataLoader, device: torch.device) -> Dict[str, float]:
-#     """
-#     Computes Block Influence (BI) scores for each LoRA layer based on
-#     average cosine similarity between input/output activations.
-
-#     s_i = 1 - mean(cos_sim(x_in, x_out))
-#     """
-#     model.eval()
-#     lora_layers = get_lora_layers(model)
-
-#     if not lora_layers:
-#         logger.warning("No LoRA layers found in the model. Returning empty scores.")
-#         return {}
-
-#     activations = {name: {'in': [], 'out': []} for name in lora_layers}
-
-#     def get_hook(name):
-#         def hook(module, input_act, output_act):
-#             activations[name]['in'].append(input_act[0].detach().cpu().float())
-#             activations[name]['out'].append(output_act.detach().cpu().float())
-#         return hook
-
-#     # Register hooks
-#     hooks = []
-#     for name, layer in lora_layers.items():
-#         hooks.append(layer.register_forward_hook(get_hook(name)))
-
-#     try:
-#         # 🔁 Collect multiple batches (not just one!)
-#         num_batches = min(3, len(dataloader))  # take up to 3 small batches
-#         iterator = iter(dataloader)
-
-#         for _ in range(num_batches):
-#             try:
-#                 batch = next(iterator)
-#             except StopIteration:
-#                 break
-
-#             batch = {k: v.to(device) for k, v in batch.items() if isinstance(v, torch.Tensor)}
-#             with torch.no_grad():
-#                 model(**batch)
-
-#     except Exception as e:
-#         logger.error(f"Failed during BI score computation: {e}")
-
-#     finally:
-#         for hook in hooks:
-#             hook.remove()
-
-#     # 🧮 Compute BI scores
-#     # bi_scores = {}
-#     # for name in lora_layers:
-#     #     if not activations[name]['in'] or not activations[name]['out']:
-#     #         logger.warning(f"No activations captured for {name}. Skipping.")
-#     #         continue
-
-#     #     in_acts = torch.cat(activations[name]['in'])
-#     #     out_acts = torch.cat(activations[name]['out'])
-
-#     #     in_flat = in_acts.view(-1, in_acts.size(-1))
-#     #     out_flat = out_acts.view(-1, out_acts.size(-1))
-
-#     #     # compute cosine similarity
-#     #     cos_sim = F.cosine_similarity(in_flat, out_flat, dim=1)
-#     #     cos_sim = torch.clamp(cos_sim, -1.0, 1.0)  # avoid >1 or <−1 numerical issues
-
-#     #     avg_cos_sim = cos_sim.mean().item()
-#     #     bi_scores[name] = 1.0 - avg_cos_sim  # higher → more influential
-
-#     # model.train()
-#     # return bi_scores
-#         # --- Compute BI scores ---
-#     bi_scores = {}
-#     for name in lora_layers:
-#         if not activations[name]['in'] or not activations[name]['out']:
-#             logger.warning(f"No activations captured for layer {name}. Skipping.")
-#             continue
-
-#         try:
-#             in_acts = torch.cat(activations[name]['in'])
-#             out_acts = torch.cat(activations[name]['out'])
-
-#             in_flat = in_acts.view(in_acts.size(0), -1)
-#             out_flat = out_acts.view(out_acts.size(0), -1)
-
-#             # Match feature dims for cosine similarity
-#             min_dim = min(in_flat.shape[1], out_flat.shape[1])
-#             if in_flat.shape[1] != out_flat.shape[1]:
-#                 in_proj = in_flat[:, :min_dim]
-#                 out_proj = out_flat[:, :min_dim]
-#             else:
-#                 in_proj, out_proj = in_flat, out_flat
-
-#             cos_sim = F.cosine_similarity(in_proj, out_proj, dim=1)
-#             cos_sim = torch.clamp(cos_sim, -1.0, 1.0)
-
-#             avg_cos_sim = cos_sim.mean().item()
-#             bi_scores[name] = 1.0 - avg_cos_sim
-
-#         except Exception as e:
-#             logger.error(f"Error computing BI for {name}: {e}")
-#             bi_scores[name] = 0.0
-#     model.train()
-#     return bi_scores
-
-
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
@@ -125,90 +10,66 @@ logger = logging.getLogger(__name__)
 def compute_bi_scores(model: torch.nn.Module, dataloader: DataLoader, device: torch.device) -> Dict[str, float]:
     """
     Computes Block Influence (BI) scores for each LoRA layer based on
-    average cosine similarity between input/output activations over multiple batches.
-
-    s_i = 1 - mean(cos_sim(x_in, x_out))
+    relative change in activation magnitude (not just cosine similarity).
+    
+    Formula:
+        BI_i = ||output|| / (||input|| + eps)
     """
+
     model.eval()
     lora_layers = get_lora_layers(model)
-
     if not lora_layers:
-        logger.warning("No LoRA layers found in the model. Returning empty scores.")
+        logger.warning("No LoRA layers found in model. Returning empty scores.")
         return {}
 
     activations = {name: {'in': [], 'out': []} for name in lora_layers}
 
-    def get_hook(name):
-        def hook(module, input_act, output_act):
-            # input_act is a tuple, we want the first element
-            activations[name]['in'].append(input_act[0].detach().cpu().float())
-            activations[name]['out'].append(output_act.detach().cpu().float())
+    def make_hook(name):
+        def hook(module, inp, out):
+            x_in = inp[0].detach().cpu().float()
+            x_out = out.detach().cpu().float()
+            activations[name]['in'].append(x_in)
+            activations[name]['out'].append(x_out)
         return hook
 
-    # Register hooks
     hooks = []
     for name, layer in lora_layers.items():
-        hooks.append(layer.register_forward_hook(get_hook(name)))
+        hooks.append(layer.register_forward_hook(make_hook(name)))
 
     try:
-        # 🔁 Collect multiple batches (Your good idea!)
-        num_batches = min(3, len(dataloader)) # take up to 3 small batches
+        num_batches = min(3, len(dataloader))
         iterator = iter(dataloader)
-
         for _ in range(num_batches):
-            try:
-                batch = next(iterator)
-            except StopIteration:
-                break
-
+            batch = next(iterator)
             batch = {k: v.to(device) for k, v in batch.items() if isinstance(v, torch.Tensor)}
             with torch.no_grad():
                 model(**batch)
-
     except Exception as e:
-        logger.error(f"Failed during BI score computation: {e}")
-
+        logger.error(f"Error during BI score computation: {e}")
     finally:
-        for hook in hooks:
-            hook.remove()
+        for h in hooks:
+            h.remove()
 
-    # 🧮 Compute BI scores
     bi_scores = {}
+    eps = 1e-6
     for name in lora_layers:
         if not activations[name]['in'] or not activations[name]['out']:
-            logger.warning(f"No activations captured for {name}. Skipping.")
             continue
-            
-        try:
-            # Concatenate all batches
-            in_acts = torch.cat(activations[name]['in'])
-            out_acts = torch.cat(activations[name]['out'])
+        x_in = torch.cat(activations[name]['in'])
+        x_out = torch.cat(activations[name]['out'])
 
-            # Correct flattening: [B, S, H] -> [B*S, H]
-            in_flat = in_acts.view(-1, in_acts.size(-1))
-            out_flat = out_acts.view(-1, out_acts.size(-1))
+        # Compute mean activation norms
+        in_norm = x_in.norm(dim=-1).mean().item() + eps
+        out_norm = x_out.norm(dim=-1).mean().item() + eps
 
-            # --- Dimension Mismatch Fix ---
-            if in_flat.shape[1] != out_flat.shape[1]:
-                logger.warning(
-                    f"Skipping BI score for {name}: "
-                    f"In/Out dims mismatch ({in_flat.shape[1]} != {out_flat.shape[1]}). "
-                    f"Score set to 0.0."
-                )
-                bi_scores[name] = 0.0
-                continue
-            # --- End Fix ---
+        # Influence = relative output norm
+        bi = out_norm / in_norm
+        bi_scores[name] = bi
 
-            # compute cosine similarity
-            cos_sim = F.cosine_similarity(in_flat, out_flat, dim=1)
-            cos_sim = torch.clamp(cos_sim, -1.0, 1.0) # avoid numerical issues
-
-            avg_cos_sim = cos_sim.mean().item()
-            bi_scores[name] = 1.0 - avg_cos_sim # s_i = 1 - rho_i
-
-        except Exception as e:
-            logger.error(f"Error computing BI for {name}: {e}")
-            bi_scores[name] = 0.0
+    # Normalize scores across layers for stability
+    s = torch.tensor(list(bi_scores.values()))
+    s_norm = (s - s.min()) / (s.max() - s.min() + eps)
+    bi_scores = {k: float(v) for k, v in zip(bi_scores.keys(), s_norm)}
 
     model.train()
     return bi_scores

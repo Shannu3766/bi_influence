@@ -5,13 +5,11 @@ def _flatten_tensor(t):
     return t.detach().cpu().reshape(t.shape[0], -1)
 
 def compute_bi_scores(model, dataloader=None, device='cuda'):
-    """Compute Block Influence scores for attention-like modules (returns dict name->bi)."""
     model.to(device)
     model.eval()
-
     block_names = []
     for name, _ in model.named_modules():
-        if any(x in name.lower() for x in ['self_attn','attention','attn','q_proj','k_proj','v_proj']):
+        if any(x in name.lower() for x in ['self_attn','attention','attn']):
             block_names.append(name)
     block_names = list(dict.fromkeys(block_names))
 
@@ -22,7 +20,7 @@ def compute_bi_scores(model, dataloader=None, device='cuda'):
     def hook_fn(name):
         def fn(mod, inp, outp):
             try:
-                if isinstance(inp, (tuple,list)) and len(inp)>0:
+                if isinstance(inp, (tuple, list)) and len(inp) > 0:
                     inp = inp[0]
                 if not torch.is_tensor(inp) or not torch.is_tensor(outp):
                     return
@@ -42,13 +40,11 @@ def compute_bi_scores(model, dataloader=None, device='cuda'):
 
     with torch.no_grad():
         for batch in tqdm(dataloader, desc='[Adaptive LoRA] Computing BI scores'):
-            batch = {k: v.to(device) if hasattr(v,'to') else v for k,v in batch.items()}
+            batch = {k: v.to(device) if hasattr(v, 'to') else v for k, v in batch.items()}
             try:
                 _ = model(**batch)
             except Exception:
-                # try removing labels if present
-                b = {k:v for k,v in batch.items() if k!='labels'}
-                _ = model(**b)
+                _ = model(**{k:v for k,v in batch.items() if k != 'labels'})
 
     for h in hooks:
         try:
@@ -70,9 +66,5 @@ def compute_bi_scores(model, dataloader=None, device='cuda'):
         bi = float(1 - cos.mean().item())
         bi_scores[n] = bi
 
-    # print brief summary
-    print('\n[Adaptive LoRA] BI scores (sample):')
-    for k,v in list(bi_scores.items())[:10]:
-        print(f'  • {k:<60s} BI={v:.6f}')
-    print('[Adaptive LoRA] (full table printed by allocator)\n')
+    print('\n[Adaptive LoRA] Computed BI scores for', len(bi_scores), 'layers.')
     return bi_scores

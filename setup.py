@@ -1,8 +1,8 @@
 from setuptools import setup, find_packages
 setup(
     name="adaptive_lora",
-    version="2.0.0",
-    description="Adaptive LoRA (Option B) - reinitialize LoRA adapters each epoch based on BI scores.",
+    version="2.1.0",
+    description="Adaptive LoRA (Option B + CSV Logging) - reinitializes LoRA each epoch and logs BI/ranks.",
     packages=find_packages(),
     install_requires=[
         "torch>=1.13",
@@ -12,6 +12,7 @@ setup(
         "tqdm",
         "numpy",
         "scikit-learn",
-        "accelerate"
+        "accelerate",
+        "pandas"
     ],
 )

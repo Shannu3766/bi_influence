@@ -1,77 +1,114 @@
-from transformers import TrainerCallback
+import os
+import logging
+from transformers import TrainerCallback, TrainingArguments, TrainerState, TrainerControl
 from torch.utils.data import DataLoader
-import csv, os, torch, copy, time
-from .bi_score import compute_bi_scores
-from .rank_allocator import allocate_ranks_softmax
-from .lora_wrapper import apply_adaptive_lora
+from .importance import compute_bi_scores
+from .allocation import allocate_ranks_bi
+from .utils import get_lora_layers, save_epoch_log
+
+logger = logging.getLogger(__name__)
 
 class AdaptiveLoRACallback(TrainerCallback):
-    def __init__(self, r_min=1, tau=0.5, total_rank=64, recompute_interval=1, val_subset_size=50, val_batch_size=2,
-                 smoothing_alpha=0.8, target_modules=None, log_path='adaptive_lora_epoch_logs.csv'):
-        self.r_min = r_min
-        self.tau = tau
+    """
+    A Hugging Face TrainerCallback that implements per-epoch adaptive
+    LoRA rank allocation based on Block Influence (BI) scores.
+    """
+    
+    def __init__(
+        self, 
+        total_rank: int,
+        val_dataloader: DataLoader,
+        tau: float = 1.0,
+        min_rank: int = 1,
+        log_path: str = "./logs",
+        verbose: bool = True
+    ):
+        """
+        Args:
+            total_rank: The total rank budget R to distribute.
+            val_dataloader: A DataLoader for a (small) subset of the validation data
+                            used to compute BI scores.
+            tau: Temperature for softmax allocation.
+            min_rank: Minimum rank for any LoRA layer.
+            log_path: Directory to save the CSV logs.
+            verbose: If True, prints a summary of rank changes each epoch.
+        """
         self.total_rank = total_rank
-        self.recompute_interval = recompute_interval
-        self.val_subset_size = val_subset_size
-        self.val_batch_size = val_batch_size
-        self.smoothing_alpha = smoothing_alpha
-        self.target_modules = target_modules or ['q_proj','k_proj','v_proj','o_proj','dense']
-        self._prev_bi = None
-        self.log_path = log_path
+        self.val_dataloader = val_dataloader
+        self.tau = tau
+        self.min_rank = min_rank
+        self.log_file = os.path.join(log_path, "adaptive_lora_epoch_logs.csv")
+        self.verbose = verbose
+        
+        # Ensure log directory exists
+        if log_path and not os.path.exists(log_path):
+            os.makedirs(log_path, exist_ok=True)
 
-        if not os.path.exists(self.log_path):
-            with open(self.log_path, 'w', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow(['epoch', 'layer', 'BI', 'Rank'])
+    def on_epoch_end(
+        self, 
+        args: TrainingArguments, 
+        state: TrainerState, 
+        control: TrainerControl, 
+        model, 
+        **kwargs
+    ):
+        """
+        Called at the end of each epoch to perform rank adaptation.
+        """
+        epoch = int(state.epoch)
+        if self.verbose:
+            print(f"\n--- AdaptiveLoRA: Starting rank update for Epoch {epoch} ---")
 
-    def on_epoch_end(self, args, state, control, **kwargs):
-        trainer = kwargs.get('trainer', None)
-        if trainer is None or not trainer.is_world_process_zero():
-            return control
-        epoch = int(state.epoch or 0)
-        total_epochs = int(getattr(trainer.args, 'num_train_epochs', 0))
-        if epoch % self.recompute_interval != 0:
-            return control
-        print(f"\n[Adaptive LoRA] Epoch {epoch}/{total_epochs}: computing BI, reallocating ranks, and logging CSV...")
+        device = next(model.parameters()).device
 
-        eval_dataset = trainer.eval_dataset
-        try:
-            if hasattr(eval_dataset, 'select'):
-                small = eval_dataset.select(range(min(self.val_subset_size, len(eval_dataset))))
-            else:
-                small = eval_dataset[:min(self.val_subset_size, len(eval_dataset))]
-        except Exception:
-            small = eval_dataset
-        val_loader = DataLoader(small, batch_size=self.val_batch_size)
+        # 1. Compute BI Scores
+        if self.verbose: print("Computing BI importance scores...")
+        scores = compute_bi_scores(model, self.val_dataloader, device)
+        
+        if not scores:
+            if self.verbose: print("No LoRA layers found or scores computed. Skipping update.")
+            return
 
-        device = trainer.args.device if hasattr(trainer.args, 'device') else ('cuda' if torch.cuda.is_available() else 'cpu')
-        if device.startswith('cuda'):
-            torch.cuda.empty_cache()
+        # 2. Allocate Ranks
+        if self.verbose: print("Allocating new ranks...")
+        new_ranks = allocate_ranks_bi(
+            scores, 
+            self.total_rank, 
+            self.tau, 
+            self.min_rank
+        )
 
-        start = time.time()
-        bi = compute_bi_scores(trainer.model, dataloader=val_loader, device=device)
-        print(f"[Adaptive LoRA] BI computed in {time.time()-start:.1f}s for {len(bi)} layers.")
+        # 3. Update LoRA Adapter Modules
+        if self.verbose: print("Applying new ranks to LoRA modules...")
+        lora_layers = get_lora_layers(model)
+        
+        for name, layer in lora_layers.items():
+            new_rank = new_ranks.get(name)
+            if new_rank is None:
+                logger.warning(f"No new rank allocated for layer {name}. Skipping.")
+                continue
 
-        if self._prev_bi:
-            for k in bi:
-                bi[k] = self.smoothing_alpha * self._prev_bi.get(k, bi[k]) + (1-self.smoothing_alpha) * bi[k]
-        self._prev_bi = copy.deepcopy(bi)
+            current_rank = layer.r.get('default', 0)
+            
+            # Only update if the rank has actually changed
+            if current_rank != new_rank:
+                if self.verbose:
+                    print(f"  - {name}: r={current_rank} -> {new_rank} "
+                          f"(Score: {scores.get(name, 0):.4f})")
+                
+                # This is the key PEFT function to resize the adapter
+                layer.update_layer(
+                    adapter_name='default',
+                    r=new_rank,
+                    lora_alpha=layer.lora_alpha.get('default', 1),
+                    lora_dropout=layer.lora_dropout.get('default', 0.0),
+                    init_lora_weights=layer.init_lora_weights
+                )
+            elif self.verbose:
+                print(f"  - {name}: r={new_rank} (Unchanged)")
 
-        ranks = allocate_ranks_softmax(bi, total_rank=self.total_rank, tau=self.tau, r_min=self.r_min)
-
-        with open(self.log_path, 'a', newline='') as f:
-            writer = csv.writer(f)
-            for k,v in ranks.items():
-                writer.writerow([epoch, k, round(bi[k],6), v])
-
-        print('[Adaptive LoRA] Reinitializing LoRA adapters fresh for next epoch...')
-        new_model = apply_adaptive_lora(trainer.model, ranks, target_modules=self.target_modules)
-        trainer.model = new_model
-        trainer.optimizer = None
-        trainer.lr_scheduler = None
-
-        if device.startswith('cuda'):
-            torch.cuda.empty_cache()
-
-        print(f"[Adaptive LoRA] ✅ Epoch {epoch} complete. BI + Ranks logged to {self.log_path}.\n")
-        return control
+        # 4. Log Results
+        save_epoch_log(self.log_file, epoch, new_ranks, scores)
+        
+        if self.verbose:
+            print(f"--- AdaptiveLoRA: Update complete. Logs saved to {self.log_file} ---")

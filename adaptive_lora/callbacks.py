@@ -3,7 +3,6 @@ import logging
 from transformers import TrainerCallback, TrainingArguments, TrainerState, TrainerControl
 from torch.utils.data import DataLoader
 from .importance import compute_bi_scores
-# Updated import
 from .allocation import allocate_ranks_bi
 from .utils import get_lora_layers, save_epoch_log
 
@@ -20,7 +19,6 @@ class AdaptiveLoRACallback(TrainerCallback):
         total_rank: int,
         val_dataloader: DataLoader,
         tau: float = 1.0,
-        # min_rank has been removed
         log_path: str = "./logs",
         verbose: bool = True
     ):
@@ -36,7 +34,6 @@ class AdaptiveLoRACallback(TrainerCallback):
         self.total_rank = total_rank
         self.val_dataloader = val_dataloader
         self.tau = tau
-        # self.min_rank = min_rank (Removed)
         self.log_file = os.path.join(log_path, "adaptive_lora_epoch_logs.csv")
         self.verbose = verbose
         
@@ -75,12 +72,21 @@ class AdaptiveLoRACallback(TrainerCallback):
             scores, 
             self.total_rank, 
             self.tau 
-            # min_rank argument removed
         )
 
         # 3. Update LoRA Adapter Modules
         if self.verbose: print("Applying new ranks to LoRA modules...")
         lora_layers = get_lora_layers(model)
+        
+        # --- Get adapter config from the main model ---
+        lora_dropout_p = 0.0
+        init_lora_weights = True
+        use_rslora = False
+        
+        if 'default' in model.peft_config:
+            config = model.peft_config['default']
+            init_lora_weights = config.init_lora_weights
+            use_rslora = config.use_rslora
         
         for name, layer in lora_layers.items():
             new_rank = new_ranks.get(name)
@@ -96,17 +102,9 @@ class AdaptiveLoRACallback(TrainerCallback):
                     print(f"  - {name}: r={current_rank} -> {new_rank} "
                           f"(Score: {scores.get(name, 0):.4f})")
                 
-                # --- FIX #1: Handle lora_dropout ---
-                lora_dropout_p = 0.0
+                # Handle lora_dropout (it's a ModuleDict)
                 if 'default' in layer.lora_dropout:
                     lora_dropout_p = layer.lora_dropout['default'].p
-                
-                # --- FIX #2 (This Error): Handle init_lora_weights ---
-                # This value is stored in the adapter's config, which is on the 
-                # *top-level model*, not the individual layer.
-                init_lora_weights = True # Default fallback
-                if 'default' in model.peft_config: # <--- CORRECTED: use 'model' not 'layer'
-                    init_lora_weights = model.peft_config['default'].init_lora_weights
                 
                 # This is the key PEFT function to resize the adapter
                 layer.update_layer(
@@ -114,9 +112,9 @@ class AdaptiveLoRACallback(TrainerCallback):
                     r=new_rank,
                     lora_alpha=layer.lora_alpha.get('default', 1),
                     lora_dropout=lora_dropout_p,
-                    init_lora_weights=init_lora_weights # Pass the value from the config
+                    init_lora_weights=init_lora_weights,
+                    use_rslora=use_rslora  # <-- THE FINAL FIX
                 )
-                # --- END FIX ---
                 
             elif self.verbose:
                 print(f"  - {name}: r={new_rank} (Unchanged)")

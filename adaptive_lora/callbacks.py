@@ -49,7 +49,7 @@ class AdaptiveLoRACallback(TrainerCallback):
         args: TrainingArguments, 
         state: TrainerState, 
         control: TrainerControl, 
-        model, 
+        model, # This 'model' is the PeftModel
         **kwargs
     ):
         """
@@ -102,10 +102,11 @@ class AdaptiveLoRACallback(TrainerCallback):
                     lora_dropout_p = layer.lora_dropout['default'].p
                 
                 # --- FIX #2 (This Error): Handle init_lora_weights ---
-                # This value is stored in the adapter's config, not on the layer.
+                # This value is stored in the adapter's config, which is on the 
+                # *top-level model*, not the individual layer.
                 init_lora_weights = True # Default fallback
-                if 'default' in layer.peft_config:
-                    init_lora_weights = layer.peft_config['default'].init_lora_weights
+                if 'default' in model.peft_config: # <--- CORRECTED: use 'model' not 'layer'
+                    init_lora_weights = model.peft_config['default'].init_lora_weights
                 
                 # This is the key PEFT function to resize the adapter
                 layer.update_layer(

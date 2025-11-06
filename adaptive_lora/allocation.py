@@ -2,27 +2,59 @@ import torch
 from typing import Dict
 import logging
 
-# Get a logger
 logger = logging.getLogger(__name__)
+
+def _largest_remainder_rounding(
+    raw_ranks: torch.Tensor, 
+    budget: int
+) -> torch.Tensor:
+    """
+    Rounds raw rank allocations to integers while perfectly preserving the sum.
+    This implements "rounding top residuals" (Algorithm 2, line 14). 
+    
+    Args:
+        raw_ranks: A tensor of floating-point rank allocations.
+        budget: The exact integer total sum that must be preserved.
+
+    Returns:
+        A tensor of integer ranks.
+    """
+    # This is r_i = floor(R * alpha_i) (Algorithm 2, line 13)
+    int_ranks = torch.floor(raw_ranks).int()
+    
+    # This is the adjustment step (Algorithm 2, line 14)
+    remainder = budget - int_ranks.sum()
+    
+    if remainder < 0:
+        # This can happen due to floating point inaccuracies
+        logger.warning(f"Rounding remainder is negative ({remainder}). Adjusting...")
+        _, top_indices = torch.topk(raw_ranks, k=int(torch.abs(remainder).item()))
+        int_ranks[top_indices] -= 1
+        return int_ranks
+        
+    elif remainder > 0:
+        # Get the "residuals" (the fractional parts)
+        residuals = raw_ranks - int_ranks
+        
+        # "rounding top residuals"
+        _, top_indices = torch.topk(residuals, k=int(remainder.item()))
+        int_ranks[top_indices] += 1
+            
+    return int_ranks
 
 def allocate_ranks_bi(
     scores: Dict[str, float], 
     total_rank: int, 
-    tau: float = 1.0, 
-    min_rank: int = 1
+    tau: float = 1.0
 ) -> Dict[str, int]:
     """
-    Allocates ranks to layers based on their BI importance scores using
-    a softmax function with temperature.
-    
-    r_i = R_remaining * Softmax(s_i / τ) + r_min
+    Allocates ranks to layers based on their BI importance scores,
+    as defined in Algorithm 2 of the paper. 
 
     Args:
-        scores: Dictionary of {layer_name: importance_score}.
-        total_rank: The total rank budget R to distribute.
-        tau: Temperature parameter τ to sharpen or soften the distribution.
-             (τ < 1 sharpens, τ > 1 softens).
-        min_rank: The *desired* minimum rank to assign to each layer.
+        scores: Dictionary of {layer_name: importance_score}. 
+        total_rank: The total rank budget R to distribute. 
+        tau: Temperature parameter τ. 
 
     Returns:
         A dictionary of {layer_name: allocated_rank}.
@@ -32,77 +64,29 @@ def allocate_ranks_bi(
 
     num_layers = len(scores)
     
-    # --- NEW ROBUSTNESS CHECK ---
-    required_min_budget = num_layers * min_rank
+    if total_rank < 0:
+        raise ValueError("Total rank must be non-negative.")
+        
+    if total_rank < num_layers:
+         logger.warning(
+            f"Total rank {total_rank} is less than the number of layers ({num_layers}). "
+            f"Some layers will necessarily be assigned a rank of 0."
+         )
     
-    if total_rank < required_min_budget:
-        # The requested min_rank is impossible with the total_rank budget.
-        # We must lower the min_rank to what is possible.
-        
-        # Calculate the highest possible integer min_rank
-        effective_min_rank = max(0, int(torch.floor(torch.tensor(total_rank / num_layers)).item()))
-        
-        logger.warning(
-            f"Total rank {total_rank} is less than the required minimum budget "
-            f"({required_min_budget} = {num_layers} layers * {min_rank} min_rank). "
-            f"Forcing a lower effective min_rank of {effective_min_rank} for all layers."
-        )
-        
-        # Overwrite the user's requested min_rank with the possible one
-        min_rank = effective_min_rank 
-        
-        if min_rank == 0:
-             logger.warning(
-                f"Total rank {total_rank} is less than the number of layers ({num_layers}). "
-                f"Some layers will be assigned a rank of 0."
-             )
-    # --- END NEW CHECK ---
-
-
-    if total_rank < num_layers * min_rank:
-        # This check is now redundant but kept as a final safeguard.
-        # It should never be hit if the logic above is correct.
-        raise ValueError(
-            f"Total rank {total_rank} is less than the minimum required "
-            f"({num_layers} layers * {min_rank} min_rank = {num_layers * min_rank})."
-        )
-
     layer_names = list(scores.keys())
     s = torch.tensor([scores[name] for name in layer_names], dtype=torch.float32)
 
-    # Calculate remaining budget after assigning min_rank to all
-    remaining_budget = total_rank - (num_layers * min_rank)
-
-    if remaining_budget == 0:
-        # No budget left, just return min_rank for all
-        return {name: min_rank for name in layer_names}
-
-    # --- Softmax allocation for the remaining budget ---
-    # r_i = R_remaining * Softmax(s_i / τ)
+    # --- Algorithm 2, Line 12 ---
+    # Compute softmax weights: alpha_i = exp(s_i / tau) / sum(...)
     s_temp = s / tau
-    probs = torch.softmax(s_temp, dim=0)
+    probs = torch.softmax(s_temp, dim=0) # This is alpha_i 
     
-    # Get raw rank allocations for the remaining budget
-    raw_ranks_to_add = probs * remaining_budget
-
-    # --- Largest Remainder Method for integer rounding ---
-    # This ensures the sum is exactly equal to remaining_budget
-    int_ranks_to_add = torch.floor(raw_ranks_to_add).int()
-    remainder = remaining_budget - int_ranks_to_add.sum()
-
-    if remainder > 0:
-        residuals = raw_ranks_to_add - int_ranks_to_add
-        # Get indices of the k largest residuals, where k = remainder
-        _, top_indices = torch.topk(residuals, k=int(remainder.item()))
-        int_ranks_to_add[top_indices] += 1
-
-    # Add the base min_rank back to the allocated ranks
-    final_ranks = int_ranks_to_add + min_rank
-
-    # Ensure sum is correct (should be, but as a safeguard)
-    if final_ranks.sum() != total_rank:
-        # Simple correction if floating point errors caused a mismatch
-        diff = total_rank - final_ranks.sum()
-        final_ranks[final_ranks.argmax()] += diff
+    # --- Algorithm 2, Line 13 & 14 ---
+    # Allocate preliminary ranks: r_i = R * alpha_i
+    raw_ranks = probs * total_rank
+    
+    # Round to integers, ensuring sum is exactly R
+    # (This implements Line 13 and 14) 
+    final_ranks = _largest_remainder_rounding(raw_ranks, total_rank)
         
     return {name: rank.item() for name, rank in zip(layer_names, final_ranks)}

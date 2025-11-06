@@ -3,6 +3,7 @@ import logging
 from transformers import TrainerCallback, TrainingArguments, TrainerState, TrainerControl
 from torch.utils.data import DataLoader
 from .importance import compute_bi_scores
+# Updated import
 from .allocation import allocate_ranks_bi
 from .utils import get_lora_layers, save_epoch_log
 
@@ -11,7 +12,7 @@ logger = logging.getLogger(__name__)
 class AdaptiveLoRACallback(TrainerCallback):
     """
     A Hugging Face TrainerCallback that implements per-epoch adaptive
-    LoRA rank allocation based on Block Influence (BI) scores.
+    LoRA rank allocation based on Block Influence (BI) scores (Algorithm 2). 
     """
     
     def __init__(
@@ -19,24 +20,23 @@ class AdaptiveLoRACallback(TrainerCallback):
         total_rank: int,
         val_dataloader: DataLoader,
         tau: float = 1.0,
-        min_rank: int = 1,
+        # min_rank has been removed
         log_path: str = "./logs",
         verbose: bool = True
     ):
         """
         Args:
-            total_rank: The total rank budget R to distribute.
+            total_rank: The total rank budget R to distribute. 
             val_dataloader: A DataLoader for a (small) subset of the validation data
-                            used to compute BI scores.
-            tau: Temperature for softmax allocation.
-            min_rank: Minimum rank for any LoRA layer.
+                            used to compute BI scores. 
+            tau: Temperature for softmax allocation. 
             log_path: Directory to save the CSV logs.
             verbose: If True, prints a summary of rank changes each epoch.
         """
         self.total_rank = total_rank
         self.val_dataloader = val_dataloader
         self.tau = tau
-        self.min_rank = min_rank
+        # self.min_rank = min_rank (Removed)
         self.log_file = os.path.join(log_path, "adaptive_lora_epoch_logs.csv")
         self.verbose = verbose
         
@@ -61,7 +61,7 @@ class AdaptiveLoRACallback(TrainerCallback):
 
         device = next(model.parameters()).device
 
-        # 1. Compute BI Scores
+        # 1. Compute BI Scores (Algorithm 2, lines 4-11)
         if self.verbose: print("Computing BI importance scores...")
         scores = compute_bi_scores(model, self.val_dataloader, device)
         
@@ -69,13 +69,13 @@ class AdaptiveLoRACallback(TrainerCallback):
             if self.verbose: print("No LoRA layers found or scores computed. Skipping update.")
             return
 
-        # 2. Allocate Ranks
+        # 2. Allocate Ranks (Algorithm 2, lines 12-14)
         if self.verbose: print("Allocating new ranks...")
         new_ranks = allocate_ranks_bi(
             scores, 
             self.total_rank, 
-            self.tau, 
-            self.min_rank
+            self.tau 
+            # min_rank argument removed
         )
 
         # 3. Update LoRA Adapter Modules

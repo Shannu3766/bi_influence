@@ -133,55 +133,40 @@ def _largest_remainder_rounding(
 #     int_ranks = torch.clamp(int_ranks, min=1)
 
 #     return {name: rank.item() for name, rank in zip(layer_names, int_ranks)}
-
 def allocate_ranks_bi(
     scores: Dict[str, float],
     total_rank: int,
     tau: float = 0.3,
     eps: float = 1e-8
 ) -> Dict[str, int]:
-    """
-    Allocates ranks to layers based on BI importance scores,
-    with safety checks to prevent out-of-range torch.topk calls.
-    """
     if not scores:
         return {}
 
     layer_names = list(scores.keys())
     s = torch.tensor([scores[name] for name in layer_names], dtype=torch.float32)
 
-    # Normalize scores to [0, 1]
     s_min, s_max = s.min(), s.max()
     if (s_max - s_min) < eps:
-        return {name: max(1, total_rank // len(scores)) for name in layer_names}
-    s_norm = (s - s_min) / (s_max - s_min)
+        base = max(1, total_rank // len(scores))
+        return {name: base for name in layer_names}
 
-    # Temperature scaling
+    s_norm = (s - s_min) / (s_max - s_min)
     s_temp = s_norm / tau
     probs = torch.softmax(s_temp, dim=0)
-
-    # Allocate preliminary ranks
     raw_ranks = probs * total_rank
     int_ranks = torch.floor(raw_ranks).int()
 
-    remainder = total_rank - int_ranks.sum().item()
+    remainder = int(total_rank - int_ranks.sum().item())
 
-    # ✅ Safety: avoid invalid topk calls
     if remainder > 0:
-        residuals = raw_ranks - int_ranks
-        k = min(int(remainder), len(residuals))
-        if k > 0:
-            _, top_indices = torch.topk(residuals, k=k)
-            int_ranks[top_indices] += 1
-
+        residuals = raw_ranks - int_ranks.float()
+        k = min(remainder, len(residuals))
+        _, top_indices = torch.topk(residuals, k=k)
+        int_ranks[top_indices] += 1
     elif remainder < 0:
-        # if we accidentally exceeded budget due to rounding
-        k = min(abs(int(remainder)), len(int_ranks))
-        if k > 0:
-            _, top_indices = torch.topk(int_ranks.float(), k=k)
-            int_ranks[top_indices] -= 1
+        k = min(abs(remainder), len(int_ranks))
+        _, top_indices = torch.topk(int_ranks.float(), k=k)
+        int_ranks[top_indices] -= 1
 
-    # Prevent zeros (no completely disabled LoRA unless intended)
     int_ranks = torch.clamp(int_ranks, min=1)
-
-    return {name: rank.item() for name, rank in zip(layer_names, int_ranks)}
+    return {name: int(rank.item()) for name, rank in zip(layer_names, int_ranks)}

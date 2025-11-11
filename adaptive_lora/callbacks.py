@@ -20,7 +20,10 @@ class AdaptiveLoRACallback(TrainerCallback):
     def __init__(
         self,
         total_rank: int,
-        val_dataloader,
+        val_dataset=None,                 # ✅ dataset (preferred)
+        *,
+        val_dataloader=None,              # ✅ or a ready dataloader
+        collate_fn=None,                  # ✅ pass-through to BI scoring
         min_rank: int = 4,
         tau: float = 1.0,
         log_path: str = "./logs",
@@ -28,7 +31,9 @@ class AdaptiveLoRACallback(TrainerCallback):
         validate_batch_size: int = 4,
     ):
         self.total_rank = total_rank
+        self.val_dataset = val_dataset
         self.val_dataloader = val_dataloader
+        self.collate_fn = collate_fn
         self.tau = tau
         self.min_rank = min_rank
         self.verbose = verbose
@@ -63,8 +68,15 @@ class AdaptiveLoRACallback(TrainerCallback):
         # 1️⃣ Compute BI scores BEFORE training
         if self.verbose:
             print("Computing BI importance scores (pre-training)...")
-        scores = compute_bi_scores(model, self.val_dataloader, device,
-                                   batch_size=self.validate_batch_size)
+
+        # ✅ Pass dataset or dataloader + batch size + collate_fn
+        scores = compute_bi_scores(
+            model,
+            self.val_dataloader,
+            device,
+            batch_size=self.validate_batch_size,
+            )
+
         if not scores:
             if self.verbose:
                 print("⚠️ No LoRA layers or BI scores found. Skipping rank update.")
@@ -73,16 +85,22 @@ class AdaptiveLoRACallback(TrainerCallback):
         # 2️⃣ Allocate new ranks
         if self.verbose:
             print("Allocating new ranks based on BI scores...")
-        new_ranks = allocate_ranks_bi(scores, self.total_rank, self.tau,self.min_rank)
+        new_ranks = allocate_ranks_bi(scores, self.total_rank, self.tau, self.min_rank)
 
         # 3️⃣ Apply new ranks to LoRA layers
         if self.verbose:
             print("Applying new ranks to LoRA modules for this epoch...")
 
         lora_layers = get_lora_layers(model)
+
+        # Guard: PEFT config presence
+        if not hasattr(model, "peft_config"):
+            logger.error("❌ PEFT config not found on model. Skipping update.")
+            return
+
         config = model.peft_config.get("default")
         if not config:
-            logger.error("❌ PEFT config not found. Skipping update.")
+            logger.error("❌ PEFT 'default' adapter config not found. Skipping update.")
             return
 
         # Extract config flags
@@ -98,7 +116,7 @@ class AdaptiveLoRACallback(TrainerCallback):
             if new_rank is None:
                 continue
 
-            current_rank = layer.r.get("default", 0)
+            current_rank = layer.r.get("default", 0) if hasattr(layer, "r") else 0
             score = scores.get(name, 0.0)
 
             # Print all layers (even unchanged ones)
@@ -118,7 +136,7 @@ class AdaptiveLoRACallback(TrainerCallback):
                 layer.update_layer(
                     adapter_name="default",
                     r=new_rank,
-                    lora_alpha=layer.lora_alpha.get("default", 1),
+                    lora_alpha=layer.lora_alpha.get("default", 1) if hasattr(layer, "lora_alpha") else 1,
                     lora_dropout=lora_dropout_p,
                     init_lora_weights=init_lora_weights,
                     use_rslora=use_rslora,
@@ -151,6 +169,4 @@ class AdaptiveLoRACallback(TrainerCallback):
         if self.latest_ranks and self.latest_scores:
             save_epoch_log(self.log_file, epoch, self.latest_ranks, self.latest_scores)
             if self.verbose:
-                print(
-                    f"📄 Epoch {epoch}: Rank allocations logged to {self.log_file}\n"
-                )
+                print(f"📄 Epoch {epoch}: Rank allocations logged to {self.log_file}\n")

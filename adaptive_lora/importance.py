@@ -207,34 +207,46 @@ logger.setLevel(logging.ERROR)  # suppress hook warnings
 
 def compute_bi_scores(
     model: torch.nn.Module,
-    val_dataset,                 
+    val_data: Union[DataLoader, torch.utils.data.Dataset],
     device: torch.device,
-    collate_fn=None,             
-    batch_size: int = 4,       
+    collate_fn=None,
+    batch_size: int = 4,
 ) -> Dict[str, float]:
     """
-    Computes the original (unnormalized) Block Influence (BI) score for each LoRA layer
-    using a fixed batch size of 4.
+    Computes the Block Influence (BI) score for each LoRA layer.
+
     Formula:
         s_i = 1 - ρ_i
-    where ρ_i is the mean cosine similarity between input and output activations.
+    where ρ_i is the mean cosine similarity between input and output activations
+    over the validation set.
+
+    Args:
+        model: LoRA model
+        val_data: validation dataset *or* dataloader
+        device: computation device
+        collate_fn: optional collator for dataset
+        batch_size: batch size to use if dataset provided
     """
 
     model.eval()
-    dataloader = DataLoader(
-        val_dataset,
-        batch_size=batch_size,
-        collate_fn=collate_fn,
-        shuffle=False,
-    )
+
+    # Allow passing either dataset or dataloader
+    if isinstance(val_data, DataLoader):
+        dataloader = val_data
+    else:
+        dataloader = DataLoader(
+            val_data,
+            batch_size=batch_size,
+            collate_fn=collate_fn,
+            shuffle=False,
+        )
 
     lora_layers = get_lora_layers(model)
     if not lora_layers:
         logger.warning("No LoRA layers found in the model. Returning empty scores.")
         return {}
 
-    # Track running sums for mean cosine similarity
-    running_stats = {name: {'sum': 0.0, 'count': 0} for name in lora_layers}
+    running_stats = {name: {"sum": 0.0, "count": 0} for name in lora_layers}
     hooks = []
 
     # Hook function factory
@@ -246,11 +258,11 @@ def compute_bi_scores(
                 x_in = input_act[0].detach().to(torch.float32)
                 x_out = output_act.detach().to(torch.float32)
 
-                # Flatten [B, L, D] -> [B*L, D]
+                # Flatten to [B*L, D]
                 in_flat = x_in.view(-1, x_in.size(-1))
                 out_flat = x_out.view(-1, x_out.size(-1))
 
-                # Ensure dimension match
+                # Handle dimension mismatches
                 d = min(in_flat.size(1), out_flat.size(1))
                 in_flat = in_flat[:, :d]
                 out_flat = out_flat[:, :d]
@@ -258,8 +270,8 @@ def compute_bi_scores(
                 cos_sim = F.cosine_similarity(in_flat, out_flat, dim=1)
                 mean_cos = cos_sim.mean().item()
 
-                running_stats[name]['sum'] += mean_cos
-                running_stats[name]['count'] += 1
+                running_stats[name]["sum"] += mean_cos
+                running_stats[name]["count"] += 1
             except Exception:
                 pass  # silently ignore hook failures
         return hook
@@ -271,7 +283,7 @@ def compute_bi_scores(
         except Exception:
             pass
 
-    logger.info("Starting BI forward pass with batch_size=4...")
+    logger.info(f"Starting BI forward pass (batch_size={batch_size})...")
     with torch.no_grad():
         for batch in tqdm(dataloader, desc="Computing BI scores", leave=True):
             batch = {k: v.to(device) for k, v in batch.items() if isinstance(v, torch.Tensor)}
@@ -281,14 +293,14 @@ def compute_bi_scores(
     for h in hooks:
         h.remove()
 
-    # Compute BI scores (1 - mean cosine)
+    # Compute BI scores
     bi_scores = {}
     for name in lora_layers:
         stats = running_stats[name]
-        if stats['count'] == 0:
+        if stats["count"] == 0:
             bi_scores[name] = 0.0
             continue
-        rho_i = stats['sum'] / stats['count']
+        rho_i = stats["sum"] / stats["count"]
         s_i = 1.0 - rho_i
         s_i = max(0.0, min(s_i, 2.0))
         bi_scores[name] = s_i

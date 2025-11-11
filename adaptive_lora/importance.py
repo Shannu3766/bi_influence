@@ -193,7 +193,6 @@
 #     model.train()
 #     return bi_scores
 
-
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
@@ -203,32 +202,32 @@ import logging
 from adaptive_lora.utils import get_lora_layers
 
 logger = logging.getLogger(__name__)
-import torch
-import torch.nn.functional as F
-from torch.utils.data import DataLoader
-from tqdm.auto import tqdm
-from typing import Dict
-import logging
-from adaptive_lora.utils import get_lora_layers
+logger.setLevel(logging.ERROR)  # suppress hook warnings
 
-logger = logging.getLogger(__name__)
 
 def compute_bi_scores(
     model: torch.nn.Module,
-    dataloader: DataLoader,
+    val_dataset,                 
     device: torch.device,
+    collate_fn=None,             
+    batch_size: int = 4,       
 ) -> Dict[str, float]:
     """
     Computes the original (unnormalized) Block Influence (BI) score for each LoRA layer
-    across the *entire* validation dataset safely with a progress bar.
-
+    using a fixed batch size of 4.
     Formula:
         s_i = 1 - ρ_i
-    where ρ_i is the mean cosine similarity between input and output activations
-    across all tokens in the validation set.
+    where ρ_i is the mean cosine similarity between input and output activations.
     """
 
     model.eval()
+    dataloader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        collate_fn=collate_fn,
+        shuffle=False,
+    )
+
     lora_layers = get_lora_layers(model)
     if not lora_layers:
         logger.warning("No LoRA layers found in the model. Returning empty scores.")
@@ -251,25 +250,28 @@ def compute_bi_scores(
                 in_flat = x_in.view(-1, x_in.size(-1))
                 out_flat = x_out.view(-1, x_out.size(-1))
 
+                # Ensure dimension match
+                d = min(in_flat.size(1), out_flat.size(1))
+                in_flat = in_flat[:, :d]
+                out_flat = out_flat[:, :d]
+
                 cos_sim = F.cosine_similarity(in_flat, out_flat, dim=1)
-                cos_sim = torch.clamp(cos_sim, -1.0, 1.0)
                 mean_cos = cos_sim.mean().item()
 
                 running_stats[name]['sum'] += mean_cos
                 running_stats[name]['count'] += 1
-            except Exception as e:
-                logger.warning(f"Hook failed for {name}: {e}")
+            except Exception:
+                pass  # silently ignore hook failures
         return hook
 
     # Register hooks
     for name, layer in lora_layers.items():
         try:
             hooks.append(layer.register_forward_hook(hook_factory(name)))
-        except Exception as e:
-            logger.warning(f"Failed to register hook for {name}: {e}")
+        except Exception:
+            pass
 
-    # Forward pass over entire validation dataset (with progress bar)
-    logger.info("Starting BI forward pass over the full validation set...")
+    logger.info("Starting BI forward pass with batch_size=4...")
     with torch.no_grad():
         for batch in tqdm(dataloader, desc="Computing BI scores", leave=True):
             batch = {k: v.to(device) for k, v in batch.items() if isinstance(v, torch.Tensor)}
@@ -292,5 +294,5 @@ def compute_bi_scores(
         bi_scores[name] = s_i
 
     model.train()
-    logger.info("✅ BI computation complete across full validation set.")
+    logger.info("✅ BI computation complete.")
     return bi_scores

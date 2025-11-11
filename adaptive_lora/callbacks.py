@@ -25,12 +25,14 @@ class AdaptiveLoRACallback(TrainerCallback):
         tau: float = 1.0,
         log_path: str = "./logs",
         verbose: bool = True,
+        validate_batch_size: int = 4,
     ):
         self.total_rank = total_rank
         self.val_dataloader = val_dataloader
         self.tau = tau
         self.min_rank = min_rank
         self.verbose = verbose
+        self.validate_batch_size = validate_batch_size
         self.log_file = os.path.join(log_path, "adaptive_lora_epoch_logs.csv")
 
         os.makedirs(log_path, exist_ok=True)
@@ -61,7 +63,8 @@ class AdaptiveLoRACallback(TrainerCallback):
         # 1️⃣ Compute BI scores BEFORE training
         if self.verbose:
             print("Computing BI importance scores (pre-training)...")
-        scores = compute_bi_scores(model, self.val_dataloader, device)
+        scores = compute_bi_scores(model, self.val_dataloader, device,
+                                   batch_size=self.validate_batch_size)
         if not scores:
             if self.verbose:
                 print("⚠️ No LoRA layers or BI scores found. Skipping rank update.")

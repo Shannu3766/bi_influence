@@ -203,7 +203,6 @@ from adaptive_lora.utils import get_lora_layers
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.ERROR)  # suppress hook warnings
 
-
 def compute_bi_scores(
     model: torch.nn.Module,
     val_data: Union[DataLoader, torch.utils.data.Dataset],
@@ -267,7 +266,9 @@ def compute_bi_scores(
                 out_flat = out_flat[:, :d]
 
                 cos_sim = F.cosine_similarity(in_flat, out_flat, dim=1)
-                mean_cos = cos_sim.mean().item()
+                cos_sim = torch.nan_to_num(cos_sim, nan=0.0, posinf=0.0, neginf=0.0)
+                cos_sim = torch.clamp(cos_sim, -1.0, 1.0)
+                mean_cos = max(min(cos_sim.mean().item(), 1.0), -1.0)
 
                 running_stats[name]["sum"] += mean_cos
                 running_stats[name]["count"] += 1
@@ -300,8 +301,9 @@ def compute_bi_scores(
             bi_scores[name] = 0.0
             continue
         rho_i = stats["sum"] / stats["count"]
+        rho_i = max(min(rho_i, 1.0), -1.0)
         s_i = 1.0 - rho_i
-        s_i = max(0.0, min(s_i, 2.0))
+        s_i = max(0.0, min(s_i, 1.0))  # strictly bound to [0, 1]
         bi_scores[name] = s_i
 
     model.train()

@@ -164,6 +164,7 @@ class AdaptiveLoRACallback(TrainerCallback):
         self,
         total_rank: int,
         val_dataloader,
+        min_rank: int = 4,
         tau: float = 1.0,
         log_path: str = "./logs",
         verbose: bool = True,
@@ -171,6 +172,7 @@ class AdaptiveLoRACallback(TrainerCallback):
         self.total_rank = total_rank
         self.val_dataloader = val_dataloader
         self.tau = tau
+        self.min_rank = min_rank
         self.verbose = verbose
         self.log_file = os.path.join(log_path, "adaptive_lora_epoch_logs.csv")
 
@@ -211,7 +213,7 @@ class AdaptiveLoRACallback(TrainerCallback):
         # 2️⃣ Allocate new ranks
         if self.verbose:
             print("Allocating new ranks based on BI scores...")
-        new_ranks = allocate_ranks_bi(scores, self.total_rank, self.tau)
+        new_ranks = allocate_ranks_bi(scores, self.total_rank, self.tau,self.min_rank)
 
         # 3️⃣ Apply new ranks to LoRA layers
         if self.verbose:

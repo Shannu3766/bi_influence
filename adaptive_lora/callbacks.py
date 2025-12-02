@@ -17,7 +17,9 @@ class AdaptiveLoRACallback(TrainerCallback):
         log_path: str = "./logs",
         verbose: bool = True,
         validate_batch_size: int = 4,
+        lora_alpha_multiplier:int=4
     ):
+        self.lora_alpha_multiplier=lora_alpha_multiplier
         self.total_rank = total_rank
         self.val_dataloader = val_dataloader
         self.tau = tau
@@ -104,7 +106,7 @@ class AdaptiveLoRACallback(TrainerCallback):
                 layer.update_layer(
                     adapter_name="default",
                     r=new_rank,
-                    lora_alpha=layer.lora_alpha.get("default", 1),
+                    lora_alpha=new_rank*self.lora_alpha_multiplier,
                     lora_dropout=lora_dropout_p,
                     init_lora_weights=init_lora_weights,
                     use_rslora=use_rslora,

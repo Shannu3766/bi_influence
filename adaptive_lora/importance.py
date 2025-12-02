@@ -7,7 +7,7 @@ import logging
 from adaptive_lora.utils import get_lora_layers
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.ERROR)  # suppress hook warnings
+logger.setLevel(logging.ERROR) 
 
 def compute_bi_scores(
     model: torch.nn.Module,
@@ -16,25 +16,9 @@ def compute_bi_scores(
     collate_fn=None,
     batch_size: int = 4,
 ) -> Dict[str, float]:
-    """
-    Computes the Block Influence (BI) score for each LoRA layer.
-
-    Formula:
-        s_i = 1 - ρ_i
-    where ρ_i is the mean cosine similarity between input and output activations
-    over the validation set.
-
-    Args:
-        model: LoRA model
-        val_data: validation dataset *or* dataloader
-        device: computation device
-        collate_fn: optional collator for dataset
-        batch_size: batch size to use if dataset provided
-    """
 
     model.eval()
 
-    # Allow passing either dataset or dataloader
     if isinstance(val_data, DataLoader):
         dataloader = val_data
     else:
@@ -53,7 +37,6 @@ def compute_bi_scores(
     running_stats = {name: {"sum": 0.0, "count": 0} for name in lora_layers}
     hooks = []
 
-    # Hook function factory
     def hook_factory(name):
         def hook(module, input_act, output_act):
             try:
@@ -62,11 +45,9 @@ def compute_bi_scores(
                 x_in = input_act[0].detach().to(torch.float32)
                 x_out = output_act.detach().to(torch.float32)
 
-                # Flatten to [B*L, D]
                 in_flat = x_in.view(-1, x_in.size(-1))
                 out_flat = x_out.view(-1, x_out.size(-1))
 
-                # Handle dimension mismatches
                 d = min(in_flat.size(1), out_flat.size(1))
                 in_flat = in_flat[:, :d]
                 out_flat = out_flat[:, :d]
@@ -79,10 +60,9 @@ def compute_bi_scores(
                 running_stats[name]["sum"] += mean_cos
                 running_stats[name]["count"] += 1
             except Exception:
-                pass  # silently ignore hook failures
+                pass 
         return hook
 
-    # Register hooks
     for name, layer in lora_layers.items():
         try:
             hooks.append(layer.register_forward_hook(hook_factory(name)))
@@ -95,11 +75,9 @@ def compute_bi_scores(
             batch = {k: v.to(device) for k, v in batch.items() if isinstance(v, torch.Tensor)}
             model(**batch)
 
-    # Remove hooks
     for h in hooks:
         h.remove()
 
-    # Compute BI scores
     bi_scores = {}
     for name in lora_layers:
         stats = running_stats[name]
@@ -109,7 +87,7 @@ def compute_bi_scores(
         rho_i = stats["sum"] / stats["count"]
         rho_i = max(min(rho_i, 1.0), -1.0)
         s_i = 1.0 - rho_i
-        s_i = max(0.0, min(s_i, 1.0))  # strictly bound to [0, 1]
+        s_i = max(0.0, min(s_i, 1.0))  
         bi_scores[name] = s_i
 
     model.train()

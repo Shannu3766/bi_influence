@@ -10,23 +10,17 @@ def allocate_ranks_bi(
     tau: float = 1.0,
     min_rank: int = 4
 ) -> Dict[str, int]:
-    """
-    Allocates ranks to layers based on raw (unnormalized) BI scores.
-    Ensures that every layer gets at least `min_rank`.
-
-    r_i = max( floor(R * softmax(s_i / τ)), min_rank )
-    """
     if not scores:
         return {}
 
     layer_names = list(scores.keys())
     s = torch.tensor([scores[name] for name in layer_names], dtype=torch.float32)
-
-    # Softmax-based proportional allocation
+    s_min, s_max = s.min(), s.max()
+    if (s_max - s_min) > 1e-6:
+        s = (s - s_min) / (s_max - s_min)
     probs = torch.softmax(s / tau, dim=0)
     raw_ranks = probs * total_rank
 
-    # Convert to integers (ensure sum = total_rank)
     int_ranks = torch.floor(raw_ranks).int()
     remainder = total_rank - int_ranks.sum()
     if remainder > 0:
@@ -34,10 +28,8 @@ def allocate_ranks_bi(
         _, top_indices = torch.topk(residuals, k=int(remainder.item()))
         int_ranks[top_indices] += 1
 
-    # ✅ Apply minimum rank constraint
     int_ranks = torch.clamp(int_ranks, min=min_rank)
 
-    # Warn if sum exceeds total_rank
     if int_ranks.sum() > total_rank + len(scores) * (min_rank - 1):
         logger.warning(f"Total allocated rank ({int_ranks.sum()}) exceeds budget ({total_rank}).")
 

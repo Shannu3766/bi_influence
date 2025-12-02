@@ -8,15 +8,6 @@ from .utils import get_lora_layers, save_epoch_log
 logger = logging.getLogger(__name__)
 
 class AdaptiveLoRACallback(TrainerCallback):
-    """
-    Adaptive LoRA callback that:
-    - Computes Block Influence (BI) scores *before each epoch*.
-    - Allocates new ranks before training that epoch.
-    - Logs and saves rank evolution after each epoch.
-
-    Works across Causal LM, Classification, and QA tasks.
-    """
-
     def __init__(
         self,
         total_rank: int,
@@ -37,13 +28,10 @@ class AdaptiveLoRACallback(TrainerCallback):
 
         os.makedirs(log_path, exist_ok=True)
 
-        # For storing the latest scores/ranks per epoch
         self.latest_scores = {}
         self.latest_ranks = {}
 
-    # ============================================================
-    # 🔁 EPOCH-BEGIN: Compute and apply ranks before training
-    # ============================================================
+
     def on_epoch_begin(
         self,
         args: TrainingArguments,
@@ -52,7 +40,6 @@ class AdaptiveLoRACallback(TrainerCallback):
         model,
         **kwargs
     ):
-        # Handle pre-training (state.epoch is None before training starts)
         epoch = int(state.epoch) + 1 if state.epoch is not None else 0
 
         if self.verbose:
@@ -60,7 +47,6 @@ class AdaptiveLoRACallback(TrainerCallback):
 
         device = next(model.parameters()).device
 
-        # 1️⃣ Compute BI scores BEFORE training
         if self.verbose:
             print("Computing BI importance scores (pre-training)...")
         scores = compute_bi_scores(
@@ -75,12 +61,10 @@ class AdaptiveLoRACallback(TrainerCallback):
                 print("⚠️ No LoRA layers or BI scores found. Skipping rank update.")
             return
 
-        # 2️⃣ Allocate new ranks
         if self.verbose:
             print("Allocating new ranks based on BI scores...")
         new_ranks = allocate_ranks_bi(scores, self.total_rank, self.tau,self.min_rank)
 
-        # 3️⃣ Apply new ranks to LoRA layers
         if self.verbose:
             print("Applying new ranks to LoRA modules for this epoch...")
 
@@ -90,7 +74,6 @@ class AdaptiveLoRACallback(TrainerCallback):
             logger.error("❌ PEFT config not found. Skipping update.")
             return
 
-        # Extract config flags
         init_lora_weights = getattr(config, "init_lora_weights", True)
         use_rslora = getattr(config, "use_rslora", False)
         use_dora = getattr(config, "use_dora", False)
@@ -106,7 +89,6 @@ class AdaptiveLoRACallback(TrainerCallback):
             current_rank = layer.r.get("default", 0)
             score = scores.get(name, 0.0)
 
-            # Print all layers (even unchanged ones)
             if current_rank != new_rank:
                 if self.verbose:
                     print(f"  - {name}: r={current_rank} → {new_rank} (Score: {score:.4f})")
@@ -114,7 +96,6 @@ class AdaptiveLoRACallback(TrainerCallback):
                 if self.verbose:
                     print(f"  - {name}: r={new_rank} (Unchanged, Score: {score:.4f})")
 
-            # Update rank if different
             if hasattr(layer, "update_layer") and current_rank != new_rank:
                 lora_dropout_p = 0.0
                 if hasattr(layer, "lora_dropout") and "default" in layer.lora_dropout:
@@ -133,16 +114,12 @@ class AdaptiveLoRACallback(TrainerCallback):
                     qalora_group_size=qalora_group_size,
                 )
 
-        # Save for logging after training
         self.latest_scores = scores
         self.latest_ranks = new_ranks
 
         if self.verbose:
             print(f"✅ AdaptiveLoRA: Rank setup for Epoch {epoch} complete.\n")
 
-    # ============================================================
-    # 📊 EPOCH-END: Log ranks and scores
-    # ============================================================
     def on_epoch_end(
         self,
         args: TrainingArguments,
